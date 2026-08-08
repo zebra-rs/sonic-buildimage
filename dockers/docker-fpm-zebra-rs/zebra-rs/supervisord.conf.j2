@@ -1,0 +1,67 @@
+[supervisord]
+logfile_maxbytes=1MB
+logfile_backups=2
+nodaemon=true
+
+[eventlistener:dependent-startup]
+command=python3 -m supervisord_dependent_startup
+autostart=true
+autorestart=unexpected
+startretries=0
+exitcodes=0,3
+events=PROCESS_STATE
+buffer_size=1024
+
+[eventlistener:supervisor-proc-exit-listener]
+command=/usr/bin/supervisor-proc-exit-listener-rs --container-name bgp
+events=PROCESS_STATE_EXITED,PROCESS_STATE_RUNNING,PROCESS_STATE_FATAL
+autostart=true
+autorestart=unexpected
+buffer_size=1024
+
+[program:rsyslogd]
+command=/usr/sbin/rsyslogd -n -iNONE
+priority=1
+autostart=false
+autorestart=unexpected
+startsecs=0
+stdout_logfile=NONE
+stdout_syslog=true
+stderr_logfile=NONE
+stderr_syslog=true
+dependent_startup=true
+
+{# One daemon instead of FRR's mgmtd/zebra/staticd/bgpd/bfdd set: zebra-rs
+   is a single process carrying the RIB and every protocol, so there is no
+   inter-daemon socket to wait on and no zsocket.sh equivalent. #}
+[program:zebra-rs]
+command=/usr/bin/zebra-rs --config-file /etc/zebra-rs/zebra-rs.conf
+priority=4
+autostart=false
+autorestart=false
+startsecs=0
+stdout_logfile=NONE
+stdout_syslog=true
+stderr_logfile=NONE
+stderr_syslog=true
+dependent_startup=true
+dependent_startup_wait_for=rsyslogd:running
+
+{# fpmsyncd is unchanged from the FRR container — it is the whole point of
+   the FPM approach that everything below it stays as it is. It listens on
+   TCP 2620; zebra-rs dials out to it. #}
+[program:fpmsyncd]
+command=fpmsyncd
+priority=5
+autostart=false
+autorestart=false
+startsecs=0
+stdout_logfile=NONE
+stdout_syslog=true
+stderr_logfile=NONE
+stderr_syslog=true
+dependent_startup=true
+dependent_startup_wait_for=zebra-rs:running
+{% if ENABLE_ASAN is defined and ENABLE_ASAN == "y" %}
+environment=ASAN_OPTIONS="log_path=/var/log/asan/fpmsyncd-asan.log{{ asan_extra_options }}"
+{% endif %}

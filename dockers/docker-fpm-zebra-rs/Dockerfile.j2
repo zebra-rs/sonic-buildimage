@@ -1,0 +1,37 @@
+{% from "dockers/dockerfile-macros.j2" import install_debian_packages, install_python_wheels, copy_files, rsync_from_builder_stage %}
+ARG BASE=docker-swss-layer-trixie-{{DOCKER_USERNAME}}:{{DOCKER_USERTAG}}
+
+FROM $BASE AS base
+
+ARG docker_container_name
+
+# Make apt-get non-interactive
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y logrotate
+
+{% if docker_fpm_zebra_rs_debs.strip() -%}
+# Copy locally-built Debian package dependencies
+{{ copy_files("debs/", docker_fpm_zebra_rs_debs.split(' '), "/debs/") }}
+
+# Install locally-built Debian packages and implicitly install their dependencies
+{{ install_debian_packages(docker_fpm_zebra_rs_debs.split(' ')) }}
+{%- endif %}
+
+{% if docker_fpm_zebra_rs_whls.strip() %}
+{{ copy_files("python-wheels/", docker_fpm_zebra_rs_whls.split(' '), "/python-wheels/") }}
+{{ install_python_wheels(docker_fpm_zebra_rs_whls.split(' ')) }}
+{% endif %}
+
+COPY ["docker_init.sh", "/usr/bin/"]
+COPY ["zebra-rs", "/usr/share/sonic/templates"]
+RUN chmod a+x /usr/bin/docker_init.sh
+
+FROM $BASE
+
+{{ rsync_from_builder_stage() }}
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+ENTRYPOINT ["/usr/bin/docker_init.sh"]

@@ -1,0 +1,15 @@
+Package: zebra-rs
+Version: @VERSION@
+Architecture: @ARCH@
+Maintainer: sonicproject <sonicproject@googlegroups.com>
+Section: net
+Priority: optional
+Homepage: https://zebra.rs/
+Description: zebra-rs routing stack for SONiC
+ BGP, OSPF and IS-IS in one memory-safe Rust daemon, replacing the FRR
+ control plane. Routes are teed to SONiC's Forwarding Plane Manager
+ (fpmsyncd) in addition to the kernel, so APPL_DB, orchagent, syncd and
+ SAI are unchanged.
+ .
+ Ships the daemon, the vtyctl CLI client and the YANG schemas the daemon
+ loads at startup.
