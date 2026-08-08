@@ -1,0 +1,72 @@
+{#- BGP routing policy, as zebra-rs `set` statements.
+    Port of dockers/docker-fpm-frr/frr/bgpd/templates/general/policies.conf.j2.
+
+    Mapping, FRR -> zebra-rs (each verified against a running daemon):
+
+      ip prefix-list N permit P        -> prefix-set N prefixes P
+      bgp community-list standard N
+        permit C                       -> community-set N members C
+      route-map N permit S             -> policy N entry S action permit
+      route-map N deny S               -> policy N entry S action deny
+      match community CS               -> policy N entry S match community CS
+      match ip address prefix-list PS  -> policy N entry S match prefix-set PS
+      set community CS additive        -> policy N entry S set community name CS
+                                        + policy N entry S set community additive
+      set comm-list CS delete          -> policy N entry S set community name CS
+                                        + policy N entry S set community delete
+
+    `additive` and `delete` are `type empty`, so they are bare keywords —
+    `set community additive`, not `... additive true`. The latter is
+    rejected.
+
+    Commits are atomic: zebra-rs applies the whole file as one candidate,
+    and a single rejected line discards the batch. That is why the
+    unsupported blocks below emit a sentinel rather than quietly omitting
+    themselves — a partially-applied policy is far more dangerous than a
+    failed commit, and the bgpcfgd backend surfaces the rejection.
+
+    UNSUPPORTED constructs, all probed and rejected by the daemon:
+
+      call <policy>          - policy chaining
+      on-match next          - continue to the next entry on a match
+      set tag <n>            - route tag
+      set ipv6 next-hop prefer-global
+
+    These are not cosmetic. `on-match next` is what makes FRR's
+    TO_BGP_PEER_V4/V6 chains accumulate actions across entries; without
+    it, entry 50 matching would stop evaluation and entry 60's
+    `set comm-list ... delete` would never run, so local anchor
+    communities would leak to peers. Approximating that is worse than
+    refusing it. -#}
+set prefix-set DEFAULT_IPV4 prefixes 0.0.0.0/0
+set prefix-set DEFAULT_IPV6 prefixes ::/0
+{# The allow-list feature builds FROM_BGP_PEER_V4/V6 out of `call` +
+    `on-match next` chains, neither of which zebra-rs has. Refuse rather
+    than emit a policy that looks right and drops routes differently. #}
+{% if constants.bgp.allow_list is defined and constants.bgp.allow_list.enabled is defined
+       and constants.bgp.allow_list.enabled and constants.bgp.allow_list.drop_community is defined %}
+set UNSUPPORTED-allow-list-needs-policy-call-and-on-match-next
+{% endif %}
+{# Anchor-route / selective-download policy for upstream line cards uses
+    `on-match next` and `set tag` the same way. #}
+{% if CONFIG_DB__DEVICE_METADATA and 'localhost' in CONFIG_DB__DEVICE_METADATA
+       and 'type' in CONFIG_DB__DEVICE_METADATA['localhost'] %}
+{% if (CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'SpineRouter'
+        and 'subtype' in CONFIG_DB__DEVICE_METADATA['localhost']
+        and CONFIG_DB__DEVICE_METADATA['localhost']['subtype'] == 'UpstreamLC')
+       or CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'UpperSpineRouter' %}
+set UNSUPPORTED-anchor-routes-need-on-match-next-and-set-tag
+{% endif %}
+{% endif %}
+{# The base policies: the peer-facing chains every role gets. FRR's
+    `route-map FROM_BGP_PEER_V6 permit 1` with `set ipv6 next-hop
+    prefer-global` is dropped here — zebra-rs has no prefer-global leaf,
+    and unlike the chains above this one is additive rather than
+    load-bearing for correctness on a v6 session whose peer already sends
+    a global next-hop. Called out because it is a silent difference, not
+    a safe one. #}
+set policy FROM_BGP_PEER_V4 entry 100 action permit
+set policy TO_BGP_PEER_V4 entry 100 action permit
+set policy FROM_BGP_PEER_V6 entry 100 action permit
+set policy TO_BGP_PEER_V6 entry 100 action permit
+set policy CHECK_IDF_ISOLATION entry 10 action permit

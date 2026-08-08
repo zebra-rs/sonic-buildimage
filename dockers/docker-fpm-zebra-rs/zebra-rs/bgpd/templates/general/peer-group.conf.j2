@@ -34,30 +34,30 @@
     production. -#}
 set router bgp neighbor-group PEER_V4
 set router bgp neighbor-group PEER_V6
-{#- allowas-in: ToR always, Leaf only when BBR is on. Same conditions as
-    the FRR template, so the two stay in step if either is edited. -#}
-{%- if CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'ToRRouter' %}
+{# allowas-in: ToR always, Leaf only when BBR is on. Same conditions as
+    the FRR template, so the two stay in step if either is edited. #}
+{% if CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'ToRRouter' %}
 set router bgp neighbor-group PEER_V4 allowas-in count 1
 set router bgp neighbor-group PEER_V6 allowas-in count 1
-{%- elif CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'LeafRouter' %}
-{%- if CONFIG_DB__BGP_BBR['status'] == 'enabled' %}
+{% elif CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'LeafRouter' %}
+{% if CONFIG_DB__BGP_BBR['status'] == 'enabled' %}
 set router bgp neighbor-group PEER_V4 allowas-in count 1
 set router bgp neighbor-group PEER_V6 allowas-in count 1
-{%- endif %}
-{%- endif %}
+{% endif %}
+{% endif %}
 set router bgp neighbor-group PEER_V4 policy in FROM_BGP_PEER_V4
 set router bgp neighbor-group PEER_V4 policy out TO_BGP_PEER_V4
 set router bgp neighbor-group PEER_V4 afi-safi ipv4 enabled true
 set router bgp neighbor-group PEER_V6 policy in FROM_BGP_PEER_V6
 set router bgp neighbor-group PEER_V6 policy out TO_BGP_PEER_V6
 set router bgp neighbor-group PEER_V6 afi-safi ipv6 enabled true
-{#- Selective route download: an upstream line card / upper spine keeps
+{# Selective route download: an upstream line card / upper spine keeps
     the full table in BGP but installs only a filtered subset into the
     FIB. In zebra-rs this is a global per-AFI table-map, matching FRR's
-    placement inside the address-family block. -#}
-{%- if (CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'SpineRouter'
+    placement inside the address-family block. #}
+{% if (CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'SpineRouter'
         and CONFIG_DB__DEVICE_METADATA['localhost']['subtype'] == 'UpstreamLC')
        or CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'UpperSpineRouter' %}
 set router bgp afi-safi ipv4 table-map SELECTIVE_ROUTE_DOWNLOAD_V4
 set router bgp afi-safi ipv6 table-map SELECTIVE_ROUTE_DOWNLOAD_V6
-{%- endif %}
+{% endif %}

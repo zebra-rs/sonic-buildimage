@@ -30,7 +30,7 @@ ZEBRA_SRC="$root/src/sonic-zebra-rs/zebra-rs"
 FIXTURE_ROOT="$root/src/sonic-bgpcfgd/tests/data/general"
 # Every template ported so far, paired with the fixture directory
 # bgpcfgd's own tests drive the FRR version with.
-TEMPLATES="instance.conf peer-group.conf"
+TEMPLATES="instance.conf peer-group.conf policies.conf"
 
 cleanup() {
     if [[ "$KEEP" == "yes" ]]; then
@@ -123,21 +123,30 @@ docker cp "$render_dir/." "$CONTAINER:/tmp/rendered/" >/dev/null
 echo
 echo "validate-templates: applying each rendered case to a live zebra-rs"
 docker exec "$CONTAINER" bash -c '
-pass=0; fail=0
+pass=0; fail=0; expected=0
 for f in /tmp/rendered/*.conf; do
     case=$(basename "$f" .conf)
     out=$(vtyctl apply -f "$f" 2>&1 || true)
     if echo "$out" | grep -q "error reply:"; then
-        echo "  REJECTED  $case"
-        echo "$out" | grep "error reply:" | sed "s/^/      /" | head -3
-        fail=$((fail+1))
+        # A rejection naming an UNSUPPORTED- sentinel is the template
+        # deliberately refusing a construct zebra-rs lacks. Anything else
+        # is a wrong config path — the failure this rig exists to catch.
+        if echo "$out" | grep "error reply:" | grep -q "UNSUPPORTED-"; then
+            echo "  refused   $case (unsupported construct, by design)"
+            echo "$out" | grep "error reply:" | grep "UNSUPPORTED-" | sed "s/^/      /" | head -1
+            expected=$((expected+1))
+        else
+            echo "  REJECTED  $case"
+            echo "$out" | grep "error reply:" | sed "s/^/      /" | head -3
+            fail=$((fail+1))
+        fi
     else
         echo "  accepted  $case"
         pass=$((pass+1))
     fi
 done
 echo
-echo "  $pass accepted, $fail rejected"
+echo "  $pass accepted, $expected refused by design, $fail unexpectedly rejected"
 [ "$fail" -eq 0 ]
 '
 rc=$?
