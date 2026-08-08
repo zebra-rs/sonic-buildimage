@@ -27,9 +27,11 @@ KEEP="no"
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd "$here/../.." && pwd)
 ZEBRA_SRC="$root/src/sonic-zebra-rs/zebra-rs"
-FIXTURE_ROOT="$root/src/sonic-bgpcfgd/tests/data/general"
-# Every template ported so far, paired with the fixture directory
-# bgpcfgd's own tests drive the FRR version with.
+FIXTURE_ROOT="$root/src/sonic-bgpcfgd/tests/data"
+# Ported families, and per family the templates that have fixtures in
+# bgpcfgd's own test data. Each is rendered from the same inputs the FRR
+# version is tested with.
+FAMILIES="general dynamic"
 TEMPLATES="instance.conf peer-group.conf policies.conf"
 
 cleanup() {
@@ -81,41 +83,52 @@ sleep 4
 # Render on the host (bgpcfgd's TemplateFabric lives here), apply in the
 # container.
 render_dir=$(mktemp -d /tmp/zrs-render.XXXXXX)
-python3 - "$here/zebra-rs/bgpd/templates/general" "$FIXTURE_ROOT" "$render_dir" "$TEMPLATES" <<'PY'
+python3 - "$here/zebra-rs" "$FIXTURE_ROOT" "$render_dir" "$TEMPLATES" "$FAMILIES" <<'PYEOF'
 import json, os, sys
 sys.path.insert(0, os.path.abspath("src/sonic-bgpcfgd"))
 from bgpcfgd.template import TemplateFabric
 
-tmpl_dir, fixture_root, out_dir, templates = sys.argv[1:5]
-fabric = TemplateFabric(tmpl_dir)
+tmpl_root, fixture_root, out_dir, templates, families = sys.argv[1:6]
 
 failures = 0
-for template in templates.split():
-    tmpl = fabric.from_file(template + ".j2")
-    fixtures = os.path.join(fixture_root, template)
-    for name in sorted(os.listdir(fixtures)):
-        if not name.startswith("param_"):
+# One fabric rooted at the template tree, exactly as bgpcfgd does, so
+# `{% import "common/functions.conf.j2" %}` resolves here iff it resolves
+# in the container.
+fabric = TemplateFabric(tmpl_root)
+for family in families.split():
+    family_rel = os.path.join("bgpd", "templates", family)
+    for template in templates.split():
+        if not os.path.exists(os.path.join(tmpl_root, family_rel, template + ".j2")):
             continue
-        case = "%s__%s" % (template, name.replace("param_", "").replace(".json", ""))
-        raw = json.load(open(os.path.join(fixtures, name)))
-        params = {}
-        for k, v in raw.items():
-            if k.startswith("CONFIG_DB__") and isinstance(v, dict):
-                params[k] = {tuple(ek.split("|")) if "|" in ek else ek: ev
-                             for ek, ev in v.items()}
-            else:
-                params[k] = v
-        try:
-            text = tmpl.render(**params)
-        except Exception as e:
-            print("RENDER-FAIL %s: %s" % (case, e))
-            failures += 1
+        fixtures = os.path.join(fixture_root, family, template)
+        if not os.path.isdir(fixtures):
+            print("no fixtures for %s/%s - skipped" % (family, template))
             continue
-        with open(os.path.join(out_dir, case + ".conf"), "w") as fp:
-            fp.write(text)
-        print("rendered %s" % case)
+        tmpl = fabric.from_file(os.path.join(family_rel, template + ".j2"))
+        for name in sorted(os.listdir(fixtures)):
+            if not name.startswith("param_"):
+                continue
+            case = "%s__%s__%s" % (family, template,
+                                   name.replace("param_", "").replace(".json", ""))
+            raw = json.load(open(os.path.join(fixtures, name)))
+            params = {}
+            for k, v in raw.items():
+                if k.startswith("CONFIG_DB__") and isinstance(v, dict):
+                    params[k] = {tuple(ek.split("|")) if "|" in ek else ek: ev
+                                 for ek, ev in v.items()}
+                else:
+                    params[k] = v
+            try:
+                text = tmpl.render(**params)
+            except Exception as e:
+                print("RENDER-FAIL %s: %s" % (case, e))
+                failures += 1
+                continue
+            with open(os.path.join(out_dir, case + ".conf"), "w") as fp:
+                fp.write(text)
+            print("rendered %s" % case)
 sys.exit(1 if failures else 0)
-PY
+PYEOF
 
 docker exec "$CONTAINER" mkdir -p /tmp/rendered
 docker cp "$render_dir/." "$CONTAINER:/tmp/rendered/" >/dev/null

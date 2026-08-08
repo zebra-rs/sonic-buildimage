@@ -1,0 +1,8 @@
+{#- Port of dockers/docker-fpm-frr/frr/bgpd/templates/dynamic/update.conf.j2:
+    incremental listen-range churn as CONFIG_DB's ip_range changes. -#}
+{% for ip_range in delete_ranges %}
+delete router bgp dynamic-neighbor listen-range {{ ip_range }} neighbor-group {{ bgp_session['name'] }}
+{% endfor %}
+{% for ip_range in add_ranges %}
+set router bgp dynamic-neighbor listen-range {{ ip_range }} neighbor-group {{ bgp_session['name'] }}
+{% endfor %}

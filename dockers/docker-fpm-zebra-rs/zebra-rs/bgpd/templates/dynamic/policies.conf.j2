@@ -1,0 +1,4 @@
+{#- Port of dockers/docker-fpm-frr/frr/bgpd/templates/dynamic/policies.conf.j2.
+    Speakers may send routes in, nothing is advertised back to them. -#}
+set policy FROM_BGP_SPEAKER entry 10 action permit
+set policy TO_BGP_SPEAKER entry 1 action deny

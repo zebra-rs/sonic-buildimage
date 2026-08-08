@@ -1,0 +1,42 @@
+{#- BGP_SPEAKER dynamic peer-group, as zebra-rs `set` statements.
+    Port of dockers/docker-fpm-frr/frr/bgpd/templates/dynamic/instance.conf.j2.
+
+    This family configures a *listen range* rather than named neighbours:
+    peers within the range are accepted dynamically and inherit the
+    group's settings.
+
+    Mapping beyond the general family (each probed against a daemon):
+
+      neighbor N peer-group          -> neighbor-group N
+      neighbor N passive             -> neighbor-group N passive true
+      neighbor N ebgp-multihop 255   -> neighbor-group N ebgp-multihop 255
+      neighbor N update-source IP    -> neighbor-group N update-source IP
+      bgp listen range R
+        peer-group N                 -> dynamic-neighbor listen-range R
+                                        neighbor-group N
+
+    GAP — `soft-reconfiguration inbound`, as in the general family:
+    zebra-rs has the capability internally but exposes no config leaf.
+    Dropped rather than refused, on the same reasoning and with the same
+    caveat that the equivalence is assumed and not measured. -#}
+{% from "common/functions.conf.j2" import get_ipv4_loopback_address %}
+set router bgp neighbor-group {{ bgp_session['name'] }}
+set router bgp neighbor-group {{ bgp_session['name'] }} passive true
+set router bgp neighbor-group {{ bgp_session['name'] }} ebgp-multihop 255
+set router bgp neighbor-group {{ bgp_session['name'] }} policy in FROM_BGP_SPEAKER
+set router bgp neighbor-group {{ bgp_session['name'] }} policy out TO_BGP_SPEAKER
+{% if bgp_session['peer_asn'] is defined %}
+set router bgp neighbor-group {{ bgp_session['name'] }} remote-as {{ bgp_session['peer_asn'] }}
+{% else %}
+set router bgp neighbor-group {{ bgp_session['name'] }} remote-as {{ constants.deployment_id_asn_map[CONFIG_DB__DEVICE_METADATA['localhost']['deployment_id']] }}
+{% endif %}
+{% for ip_range in bgp_session['ip_range'].split(',') %}
+set router bgp dynamic-neighbor listen-range {{ ip_range }} neighbor-group {{ bgp_session['name'] }}
+{% endfor %}
+{% if bgp_session['src_address'] is defined %}
+set router bgp neighbor-group {{ bgp_session['name'] }} update-source {{ bgp_session['src_address'] | ip }}
+{% else %}
+set router bgp neighbor-group {{ bgp_session['name'] }} update-source {{ get_ipv4_loopback_address(CONFIG_DB__LOOPBACK_INTERFACE, "Loopback1") | ip }}
+{% endif %}
+set router bgp neighbor-group {{ bgp_session['name'] }} afi-safi ipv4 enabled true
+set router bgp neighbor-group {{ bgp_session['name'] }} afi-safi ipv6 enabled true
