@@ -8,6 +8,8 @@
         permit C                       -> community-set N members C
       route-map N permit S             -> policy N entry S action permit
       route-map N deny S               -> policy N entry S action deny
+      route-map N permit S
+        + on-match next                -> policy N entry S action next
       match community CS               -> policy N entry S match community CS
       match ip address prefix-list PS  -> policy N entry S match prefix-set PS
       set community CS additive        -> policy N entry S set community name CS
@@ -16,57 +18,79 @@
                                         + policy N entry S set community delete
 
     `additive` and `delete` are `type empty`, so they are bare keywords —
-    `set community additive`, not `... additive true`. The latter is
-    rejected.
+    `set community additive`, not `... additive true`, which is rejected.
+
+    `on-match next` is not a separate node here: it is the third value of
+    the entry's terminal `action` (permit / deny / next), and the policy
+    walker already implements it — `next` applies the entry's set clauses
+    and falls through to the following entry, which is exactly what FRR
+    spells as `permit` plus `on-match next`.
 
     Commits are atomic: zebra-rs applies the whole file as one candidate,
-    and a single rejected line discards the batch. That is why the
-    unsupported blocks below emit a sentinel rather than quietly omitting
-    themselves — a partially-applied policy is far more dangerous than a
-    failed commit, and the bgpcfgd backend surfaces the rejection.
+    and a single rejected line discards the batch. The one unsupported
+    block below therefore emits a sentinel rather than quietly omitting
+    itself — a partially-applied policy is more dangerous than a failed
+    commit, and the bgpcfgd backend surfaces the rejection.
 
-    UNSUPPORTED constructs, all probed and rejected by the daemon:
-
-      call <policy>          - policy chaining
-      on-match next          - continue to the next entry on a match
-      set tag <n>            - route tag
-      set ipv6 next-hop prefer-global
-
-    These are not cosmetic. `on-match next` is what makes FRR's
-    TO_BGP_PEER_V4/V6 chains accumulate actions across entries; without
-    it, entry 50 matching would stop evaluation and entry 60's
-    `set comm-list ... delete` would never run, so local anchor
-    communities would leak to peers. Approximating that is worse than
-    refusing it. -#}
+    UNSUPPORTED: `call <policy>` (policy chaining) and `set tag <n>`,
+    both probed and rejected. Only the allow-list feature needs them. -#}
 set prefix-set DEFAULT_IPV4 prefixes 0.0.0.0/0
 set prefix-set DEFAULT_IPV6 prefixes ::/0
-{# The allow-list feature builds FROM_BGP_PEER_V4/V6 out of `call` +
-    `on-match next` chains, neither of which zebra-rs has. Refuse rather
-    than emit a policy that looks right and drops routes differently. #}
+{# The allow-list feature builds FROM_BGP_PEER_V4/V6 from `call` chains
+   and tags matched routes with `set tag`. Neither has a zebra-rs
+   equivalent, so refuse rather than emit a policy that looks right and
+   drops routes differently. #}
 {% if constants.bgp.allow_list is defined and constants.bgp.allow_list.enabled is defined
-       and constants.bgp.allow_list.enabled and constants.bgp.allow_list.drop_community is defined %}
-set UNSUPPORTED-allow-list-needs-policy-call-and-on-match-next
+      and constants.bgp.allow_list.enabled and constants.bgp.allow_list.drop_community is defined %}
+set UNSUPPORTED-allow-list-needs-policy-call-and-set-tag
 {% endif %}
-{# Anchor-route / selective-download policy for upstream line cards uses
-    `on-match next` and `set tag` the same way. #}
-{% if CONFIG_DB__DEVICE_METADATA and 'localhost' in CONFIG_DB__DEVICE_METADATA
-       and 'type' in CONFIG_DB__DEVICE_METADATA['localhost'] %}
-{% if (CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'SpineRouter'
-        and 'subtype' in CONFIG_DB__DEVICE_METADATA['localhost']
-        and CONFIG_DB__DEVICE_METADATA['localhost']['subtype'] == 'UpstreamLC')
-       or CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'UpperSpineRouter' %}
-set UNSUPPORTED-anchor-routes-need-on-match-next-and-set-tag
-{% endif %}
-{% endif %}
-{# The base policies: the peer-facing chains every role gets. FRR's
-    `route-map FROM_BGP_PEER_V6 permit 1` with `set ipv6 next-hop
-    prefer-global` is dropped here — zebra-rs has no prefer-global leaf,
-    and unlike the chains above this one is additive rather than
-    load-bearing for correctness on a v6 session whose peer already sends
-    a global next-hop. Called out because it is a silent difference, not
-    a safe one. #}
+{# The peer-facing chains every role gets.
+
+   FRR's `FROM_BGP_PEER_V6 permit 1` also sets `ipv6 next-hop
+   prefer-global`, for which zebra-rs has no leaf. Dropped rather than
+   refused: it is additive on a session whose peer already sends a global
+   next-hop. A silent difference, recorded as such. #}
 set policy FROM_BGP_PEER_V4 entry 100 action permit
 set policy TO_BGP_PEER_V4 entry 100 action permit
 set policy FROM_BGP_PEER_V6 entry 100 action permit
 set policy TO_BGP_PEER_V6 entry 100 action permit
 set policy CHECK_IDF_ISOLATION entry 10 action permit
+{# Anchor routes and selective route download, for upstream line cards
+   and upper spines. Expressible in full: the `on-match next` chains that
+   accumulate community actions across entries 50 and 60 become
+   `action next`, and `set comm-list ... delete` becomes
+   `set community ... delete`. #}
+{% if CONFIG_DB__DEVICE_METADATA and 'localhost' in CONFIG_DB__DEVICE_METADATA
+      and 'type' in CONFIG_DB__DEVICE_METADATA['localhost'] %}
+{% if (CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'SpineRouter'
+       and 'subtype' in CONFIG_DB__DEVICE_METADATA['localhost']
+       and CONFIG_DB__DEVICE_METADATA['localhost']['subtype'] == 'UpstreamLC')
+      or CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'UpperSpineRouter' %}
+set community-set ANCHOR_ROUTE_COMMUNITY members {{ constants.bgp.anchor_route_community }}
+set community-set LOCAL_ANCHOR_ROUTE_COMMUNITY members {{ constants.bgp.local_anchor_route_community }}
+set community-set ANCHOR_CONTRIBUTING_ROUTE_COMMUNITY members {{ constants.bgp.anchor_contributing_route_community }}
+set policy SELECTIVE_ROUTE_DOWNLOAD_V4 entry 10 action deny
+set policy SELECTIVE_ROUTE_DOWNLOAD_V4 entry 10 match community LOCAL_ANCHOR_ROUTE_COMMUNITY
+set policy SELECTIVE_ROUTE_DOWNLOAD_V4 entry 1000 action permit
+set policy SELECTIVE_ROUTE_DOWNLOAD_V6 entry 10 action deny
+set policy SELECTIVE_ROUTE_DOWNLOAD_V6 entry 10 match community LOCAL_ANCHOR_ROUTE_COMMUNITY
+set policy SELECTIVE_ROUTE_DOWNLOAD_V6 entry 1000 action permit
+set policy TAG_ANCHOR_COMMUNITY entry 10 action permit
+set policy TAG_ANCHOR_COMMUNITY entry 10 set community name ANCHOR_ROUTE_COMMUNITY
+set policy TAG_ANCHOR_COMMUNITY entry 10 set community additive
+set policy TO_BGP_PEER_V4 entry 50 action next
+set policy TO_BGP_PEER_V4 entry 50 match prefix-set ANCHOR_CONTRIBUTING_ROUTES
+set policy TO_BGP_PEER_V4 entry 50 set community name ANCHOR_CONTRIBUTING_ROUTE_COMMUNITY
+set policy TO_BGP_PEER_V4 entry 50 set community additive
+set policy TO_BGP_PEER_V4 entry 60 action next
+set policy TO_BGP_PEER_V4 entry 60 set community name LOCAL_ANCHOR_ROUTE_COMMUNITY
+set policy TO_BGP_PEER_V4 entry 60 set community delete
+set policy TO_BGP_PEER_V6 entry 50 action next
+set policy TO_BGP_PEER_V6 entry 50 match prefix-set ANCHOR_CONTRIBUTING_ROUTES
+set policy TO_BGP_PEER_V6 entry 50 set community name ANCHOR_CONTRIBUTING_ROUTE_COMMUNITY
+set policy TO_BGP_PEER_V6 entry 50 set community additive
+set policy TO_BGP_PEER_V6 entry 60 action next
+set policy TO_BGP_PEER_V6 entry 60 set community name LOCAL_ANCHOR_ROUTE_COMMUNITY
+set policy TO_BGP_PEER_V6 entry 60 set community delete
+{% endif %}
+{% endif %}
