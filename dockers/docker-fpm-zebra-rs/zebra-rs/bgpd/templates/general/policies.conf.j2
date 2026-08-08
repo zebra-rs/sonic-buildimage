@@ -27,22 +27,94 @@
     spells as `permit` plus `on-match next`.
 
     Commits are atomic: zebra-rs applies the whole file as one candidate,
-    and a single rejected line discards the batch. The one unsupported
-    block below therefore emits a sentinel rather than quietly omitting
-    itself — a partially-applied policy is more dangerous than a failed
-    commit, and the bgpcfgd backend surfaces the rejection.
+    and a single rejected line discards the batch, so a refused construct
+    fails the whole render rather than applying half a policy.
 
-    UNSUPPORTED: `call <policy>` (policy chaining) and `set tag <n>`,
-    both probed and rejected. Only the allow-list feature needs them. -#}
+    Every construct this template needs is now supported. `call` and
+    `set tag` were added to zebra-rs for the allow-list block below;
+    `on-match next` was already there, spelled `action next`.
+
+    One difference remains, and it is silent rather than refused: FRR's
+    inline `set community no-export additive` has no zebra-rs equivalent,
+    because `set community` there references a *named* community-set.
+    The template defines the sets it needs instead, which is equivalent
+    but means the set names are part of this file's contract. -#}
 set prefix-set DEFAULT_IPV4 prefixes 0.0.0.0/0
 set prefix-set DEFAULT_IPV6 prefixes ::/0
-{# The allow-list feature builds FROM_BGP_PEER_V4/V6 from `call` chains
-   and tags matched routes with `set tag`. Neither has a zebra-rs
-   equivalent, so refuse rather than emit a policy that looks right and
-   drops routes differently. #}
+{# The allow-list scaffolding. `managers_allow_list.py` owns the
+   ALLOW_LIST_DEPLOYMENT_ID_* policies at runtime and allocates sequence
+   numbers inside them; this template only lays down the default-action
+   entry (65535) and the FROM_BGP_PEER chain that calls them.
+
+   NOTE: that manager still emits FRR syntax (`route-map X permit N`) and
+   parses FRR's running-config to find the next sequence number, so the
+   feature is not end-to-end on zebra-rs until it is ported. This block
+   makes the static half correct; it does not make the feature work. #}
 {% if constants.bgp.allow_list is defined and constants.bgp.allow_list.enabled is defined
       and constants.bgp.allow_list.enabled and constants.bgp.allow_list.drop_community is defined %}
-set UNSUPPORTED-allow-list-needs-policy-call-and-set-tag
+{# FRR sets an inline community; zebra-rs references a named set, so
+   define one per default action. #}
+{% if allow_list_default_action == 'deny' %}
+set community-set ALLOW_LIST_DEFAULT_ACTION members no-export
+{% else %}
+set community-set ALLOW_LIST_DEFAULT_ACTION members {{ constants.bgp.allow_list.drop_community }}
+{% endif %}
+set policy ALLOW_LIST_DEPLOYMENT_ID_0_V4 entry 65535 action permit
+set policy ALLOW_LIST_DEPLOYMENT_ID_0_V4 entry 65535 set community name ALLOW_LIST_DEFAULT_ACTION
+set policy ALLOW_LIST_DEPLOYMENT_ID_0_V4 entry 65535 set community additive
+set policy ALLOW_LIST_DEPLOYMENT_ID_0_V6 entry 65535 action permit
+set policy ALLOW_LIST_DEPLOYMENT_ID_0_V6 entry 65535 set community name ALLOW_LIST_DEFAULT_ACTION
+set policy ALLOW_LIST_DEPLOYMENT_ID_0_V6 entry 65535 set community additive
+set community-set allow_list_default_community members no-export
+set community-set allow_list_default_community members {{ constants.bgp.allow_list.drop_community }}
+{# entry 10: run the (runtime-managed) allow-list, then keep going —
+   `call` plus `action next`. #}
+set policy FROM_BGP_PEER_V4 entry 10 action next
+set policy FROM_BGP_PEER_V4 entry 10 call ALLOW_LIST_DEPLOYMENT_ID_0_V4
+set policy FROM_BGP_PEER_V6 entry 10 action next
+set policy FROM_BGP_PEER_V6 entry 10 call ALLOW_LIST_DEPLOYMENT_ID_0_V6
+{% if CONFIG_DB__DEVICE_METADATA and 'localhost' in CONFIG_DB__DEVICE_METADATA and 'type' in CONFIG_DB__DEVICE_METADATA['localhost'] and 'subtype' in CONFIG_DB__DEVICE_METADATA['localhost'] %}
+{% if CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'SpineRouter' and CONFIG_DB__DEVICE_METADATA['localhost']['subtype'] == 'UpstreamLC' %}
+{# Upstream line card: a route carrying the allow-list default community
+   falls through (entry 11 -> 12 -> 13) so the default route can be
+   tagged and marked as an internal fallback. #}
+set policy FROM_BGP_PEER_V4 entry 11 action next
+set policy FROM_BGP_PEER_V4 entry 11 match community allow_list_default_community
+set policy FROM_BGP_PEER_V4 entry 12 action permit
+set policy FROM_BGP_PEER_V4 entry 12 match prefix-set DEFAULT_IPV4
+set policy FROM_BGP_PEER_V4 entry 13 action permit
+{% if CONFIG_DB__DEVICE_METADATA['localhost']['switch_type'] != 'chassis-packet' %}
+set policy FROM_BGP_PEER_V4 entry 13 set tag {{ constants.bgp.route_do_not_send_appdb_tag }}
+{% else %}
+set policy FROM_BGP_PEER_V4 entry 13 set tag {{ constants.bgp.route_eligible_for_fallback_to_default_tag }}
+{% endif %}
+set community-set INTERNAL_FALLBACK members {{ constants.bgp.internal_fallback_community }}
+set policy FROM_BGP_PEER_V4 entry 13 set community name INTERNAL_FALLBACK
+set policy FROM_BGP_PEER_V4 entry 13 set community additive
+set policy FROM_BGP_PEER_V6 entry 11 action next
+set policy FROM_BGP_PEER_V6 entry 11 match community allow_list_default_community
+set policy FROM_BGP_PEER_V6 entry 12 action permit
+set policy FROM_BGP_PEER_V6 entry 12 match prefix-set DEFAULT_IPV6
+set policy FROM_BGP_PEER_V6 entry 13 action permit
+{% if CONFIG_DB__DEVICE_METADATA['localhost']['switch_type'] != 'chassis-packet' %}
+set policy FROM_BGP_PEER_V6 entry 13 set tag {{ constants.bgp.route_do_not_send_appdb_tag }}
+{% else %}
+set policy FROM_BGP_PEER_V6 entry 13 set tag {{ constants.bgp.route_eligible_for_fallback_to_default_tag }}
+{% endif %}
+set policy FROM_BGP_PEER_V6 entry 13 set community name INTERNAL_FALLBACK
+set policy FROM_BGP_PEER_V6 entry 13 set community additive
+{% else %}
+set policy FROM_BGP_PEER_V4 entry 11 action permit
+set policy FROM_BGP_PEER_V4 entry 11 match community allow_list_default_community
+set policy FROM_BGP_PEER_V6 entry 11 action permit
+set policy FROM_BGP_PEER_V6 entry 11 match community allow_list_default_community
+{% endif %}
+{% else %}
+set policy FROM_BGP_PEER_V4 entry 11 action permit
+set policy FROM_BGP_PEER_V4 entry 11 match community allow_list_default_community
+set policy FROM_BGP_PEER_V6 entry 11 action permit
+set policy FROM_BGP_PEER_V6 entry 11 match community allow_list_default_community
+{% endif %}
 {% endif %}
 {# The peer-facing chains every role gets.
 
