@@ -102,16 +102,29 @@ class ZebraRs(object):
             fp.write("%s\n" % config_text)
         command = [VTYCTL, "apply", "-f", tmp_filename]
         ret_code, out, err = run_command(command)
-        if ret_code != 0:
+        # `vtyctl apply` exits 0 even when the daemon rejects a line — it
+        # reports the rejection as `error reply: <line>` on the stream and
+        # still returns success. Checking only the exit code would let a
+        # bad template silently no-op, which is the worst failure mode
+        # here: the config looks applied and is not. Observed against a
+        # live daemon; if vtyctl ever grows a non-zero exit for this, the
+        # check below stays correct anyway.
+        rejected = [
+            line for line in (out or "").splitlines() + (err or "").splitlines()
+            if line.startswith("error reply:")
+        ]
+        if ret_code != 0 or rejected:
             err_tuple = tmp_filename, ret_code, out, err
             log_err(
                 "ZebraRs::write(): can't push configuration from file='%s', rc='%d', stdout='%s', stderr='%s'"
                 % err_tuple
             )
+            for line in rejected:
+                log_err("ZebraRs::write(): rejected: %s" % line)
         else:
             if not g_debug:
                 os.remove(tmp_filename)
-        return ret_code == 0
+        return ret_code == 0 and not rejected
 
     @staticmethod
     def restart_peer_groups(peer_groups):

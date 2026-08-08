@@ -93,6 +93,31 @@ def test_write_failure_is_reported():
     assert not bgpcfgd.zebra_rs.ZebraRs.write("set nonsense")
 
 
+def test_write_detects_rejection_despite_zero_exit():
+    """`vtyctl apply` exits 0 even when the daemon rejects a line.
+
+    It reports `error reply: <line>` and still returns success, so an
+    exit-code-only check would let a bad template silently no-op — the
+    config would look applied and would not be. Observed against a live
+    daemon.
+    """
+    bgpcfgd.zebra_rs.run_command = lambda cmd, **kwargs: (
+        0,
+        "line:set bogus leaf 1\nerror reply: set bogus leaf 1\n",
+        "",
+    )
+    assert not bgpcfgd.zebra_rs.ZebraRs.write("set bogus leaf 1")
+
+
+def test_write_accepts_a_clean_apply():
+    bgpcfgd.zebra_rs.run_command = lambda cmd, **kwargs: (
+        0,
+        "line:set router bgp global as 65100\napplied\n",
+        "",
+    )
+    assert bgpcfgd.zebra_rs.ZebraRs.write("set router bgp global as 65100")
+
+
 def test_restart_peer_groups_reports_unsupported():
     """Peer-group soft-clear has no zebra-rs equivalent yet.
 

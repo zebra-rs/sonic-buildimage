@@ -1,0 +1,56 @@
+{#- BGP neighbour, as zebra-rs `set` statements.
+    Port of dockers/docker-fpm-frr/frr/bgpd/templates/general/instance.conf.j2.
+
+    Every path below was checked against a running daemon rather than
+    read off the YANG, because the nesting is not obvious from the
+    schema and a wrong path is accepted by `vtyctl apply` with exit 0
+    (it reports `error reply:` on the stream) — so a typo here fails
+    silently unless something checks. The bgpcfgd backend does check.
+
+    Mapping, FRR -> zebra-rs:
+
+      neighbor X remote-as N        -> neighbor X remote-as N
+      neighbor X description D      -> neighbor X description D
+      neighbor X shutdown           -> neighbor X enabled false
+      (no shutdown)                 -> neighbor X enabled true
+      neighbor X timers connect 10  -> neighbor X timers connect-retry-time 10
+      neighbor X timers K H         -> neighbor X timers hold-time H   (see below)
+      neighbor X peer-group PG      -> neighbor X neighbor-group PG
+      neighbor X activate (per-AF)  -> neighbor X afi-safi <af> enabled true
+
+    GAP — keepalive. FRR's `timers <keepalive> <holdtime>` sets both;
+    zebra-rs's per-neighbour `timers` container carries only
+    `connect-retry-time` and `hold-time`, with no keepalive leaf (RFC
+    4271 derives it from hold-time). The hold time is carried across and
+    the keepalive is dropped.
+
+    This is not hypothetical: bgpcfgd's own `timers_1` fixture sets
+    keepalive 5 with a default hold time, for which FRR emits
+    `timers 5 180`. Rendered here that peer gets the default keepalive of
+    60 instead of 5 — a real behaviour change for any deployment that
+    tunes keepalive independently. Closing it needs a keepalive leaf in
+    zebra-rs; until then this is a known divergence, not an
+    approximation anyone should rely on. -#}
+set router bgp neighbor {{ neighbor_addr }} remote-as {{ bgp_session['asn'] }}
+{%- if bgp_session['name'] is defined %}
+set router bgp neighbor {{ neighbor_addr }} description {{ bgp_session['name'] }}
+{%- endif %}
+{%- if bgp_session['holdtime'] is defined and bgp_session['holdtime'] | int != 180 %}
+set router bgp neighbor {{ neighbor_addr }} timers hold-time {{ bgp_session['holdtime'] }}
+{%- endif %}
+set router bgp neighbor {{ neighbor_addr }} timers connect-retry-time 10
+{%- if 'admin_status' in bgp_session and bgp_session['admin_status'] == 'down'
+      or 'admin_status' not in bgp_session
+         and 'default_bgp_status' in CONFIG_DB__DEVICE_METADATA['localhost']
+         and CONFIG_DB__DEVICE_METADATA['localhost']['default_bgp_status'] == 'down' %}
+set router bgp neighbor {{ neighbor_addr }} enabled false
+{%- else %}
+set router bgp neighbor {{ neighbor_addr }} enabled true
+{%- endif %}
+{%- if neighbor_addr | ipv4 %}
+set router bgp neighbor {{ neighbor_addr }} neighbor-group PEER_V4
+set router bgp neighbor {{ neighbor_addr }} afi-safi ipv4 enabled true
+{%- elif neighbor_addr | ipv6 %}
+set router bgp neighbor {{ neighbor_addr }} neighbor-group PEER_V6
+set router bgp neighbor {{ neighbor_addr }} afi-safi ipv6 enabled true
+{%- endif %}
