@@ -27,7 +27,10 @@ KEEP="no"
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd "$here/../.." && pwd)
 ZEBRA_SRC="$root/src/sonic-zebra-rs/zebra-rs"
-FIXTURES="$root/src/sonic-bgpcfgd/tests/data/general/instance.conf"
+FIXTURE_ROOT="$root/src/sonic-bgpcfgd/tests/data/general"
+# Every template ported so far, paired with the fixture directory
+# bgpcfgd's own tests drive the FRR version with.
+TEMPLATES="instance.conf peer-group.conf"
 
 cleanup() {
     if [[ "$KEEP" == "yes" ]]; then
@@ -38,18 +41,38 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for b in "$ZEBRA_SRC/target/release/zebra-rs" "$ZEBRA_SRC/target/release/vtyctl"; do
-    [[ -x "$b" ]] || { echo "missing $b — build zebra-rs first" >&2; exit 1; }
-done
+# Binaries: the submodule's own target/ if it has been built there,
+# otherwise a sibling zebra-rs checkout, otherwise ZEBRA_BIN_DIR. The
+# submodule is normally a pristine checkout — building in it dirties a
+# tree that is meant to be a pinned reference — so a developer's own
+# working copy is the common case.
+if [[ -z "${ZEBRA_BIN_DIR:-}" ]]; then
+    for cand in "$ZEBRA_SRC/target/release" "$root/../zebra-rs/target/release"; do
+        if [[ -x "$cand/zebra-rs" && -x "$cand/vtyctl" ]]; then
+            ZEBRA_BIN_DIR="$cand"
+            break
+        fi
+    done
+fi
+if [[ -z "${ZEBRA_BIN_DIR:-}" ]]; then
+    echo "no zebra-rs/vtyctl binaries found." >&2
+    echo "  build in the submodule, or a sibling checkout, or set ZEBRA_BIN_DIR" >&2
+    exit 1
+fi
+echo "validate-templates: using binaries from $ZEBRA_BIN_DIR"
+
+# YANG schemas must match the binary, so take them from the same tree.
+YANG_DIR="$(cd "$ZEBRA_BIN_DIR/../.." && pwd)/zebra-rs/yang"
+[[ -d "$YANG_DIR" ]] || { echo "no YANG schemas at $YANG_DIR" >&2; exit 1; }
 
 docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 docker run -d --name "$CONTAINER" --init --cap-add NET_ADMIN \
     --entrypoint /bin/sleep "$FRR_IMAGE" infinity >/dev/null
 
-docker cp "$ZEBRA_SRC/target/release/zebra-rs" "$CONTAINER:/usr/bin/" >/dev/null
-docker cp "$ZEBRA_SRC/target/release/vtyctl" "$CONTAINER:/usr/bin/" >/dev/null
+docker cp "$ZEBRA_BIN_DIR/zebra-rs" "$CONTAINER:/usr/bin/" >/dev/null
+docker cp "$ZEBRA_BIN_DIR/vtyctl" "$CONTAINER:/usr/bin/" >/dev/null
 docker exec "$CONTAINER" mkdir -p /usr/share/zebra-rs/yang
-docker cp "$ZEBRA_SRC/zebra-rs/yang/." "$CONTAINER:/usr/share/zebra-rs/yang/" >/dev/null
+docker cp "$YANG_DIR/." "$CONTAINER:/usr/share/zebra-rs/yang/" >/dev/null
 
 docker exec -d "$CONTAINER" bash -c \
     'zebra-rs --yang-path /usr/share/zebra-rs/yang > /tmp/zebra-rs.log 2>&1'
@@ -58,36 +81,40 @@ sleep 4
 # Render on the host (bgpcfgd's TemplateFabric lives here), apply in the
 # container.
 render_dir=$(mktemp -d /tmp/zrs-render.XXXXXX)
-python3 - "$here/zebra-rs/bgpd/templates/general/instance.conf.j2" "$FIXTURES" "$render_dir" <<'PY'
+python3 - "$here/zebra-rs/bgpd/templates/general" "$FIXTURE_ROOT" "$render_dir" "$TEMPLATES" <<'PY'
 import json, os, sys
-sys.path.insert(0, os.path.join(os.path.dirname(sys.argv[3]), ""))
 sys.path.insert(0, os.path.abspath("src/sonic-bgpcfgd"))
 from bgpcfgd.template import TemplateFabric
 
-tmpl_path, fixtures, out_dir = sys.argv[1], sys.argv[2], sys.argv[3]
-fabric = TemplateFabric(os.path.dirname(tmpl_path))
-tmpl = fabric.from_file(os.path.basename(tmpl_path))
+tmpl_dir, fixture_root, out_dir, templates = sys.argv[1:5]
+fabric = TemplateFabric(tmpl_dir)
 
-for name in sorted(os.listdir(fixtures)):
-    if not name.startswith("param_"):
-        continue
-    case = name.replace("param_", "").replace(".json", "")
-    raw = json.load(open(os.path.join(fixtures, name)))
-    params = {}
-    for k, v in raw.items():
-        if k.startswith("CONFIG_DB__") and isinstance(v, dict):
-            params[k] = {tuple(ek.split("|")) if "|" in ek else ek: ev
-                         for ek, ev in v.items()}
-        else:
-            params[k] = v
-    try:
-        text = tmpl.render(**params)
-    except Exception as e:
-        print("RENDER-FAIL %s: %s" % (case, e))
-        continue
-    with open(os.path.join(out_dir, case + ".conf"), "w") as fp:
-        fp.write(text)
-    print("rendered %s" % case)
+failures = 0
+for template in templates.split():
+    tmpl = fabric.from_file(template + ".j2")
+    fixtures = os.path.join(fixture_root, template)
+    for name in sorted(os.listdir(fixtures)):
+        if not name.startswith("param_"):
+            continue
+        case = "%s__%s" % (template, name.replace("param_", "").replace(".json", ""))
+        raw = json.load(open(os.path.join(fixtures, name)))
+        params = {}
+        for k, v in raw.items():
+            if k.startswith("CONFIG_DB__") and isinstance(v, dict):
+                params[k] = {tuple(ek.split("|")) if "|" in ek else ek: ev
+                             for ek, ev in v.items()}
+            else:
+                params[k] = v
+        try:
+            text = tmpl.render(**params)
+        except Exception as e:
+            print("RENDER-FAIL %s: %s" % (case, e))
+            failures += 1
+            continue
+        with open(os.path.join(out_dir, case + ".conf"), "w") as fp:
+            fp.write(text)
+        print("rendered %s" % case)
+sys.exit(1 if failures else 0)
 PY
 
 docker exec "$CONTAINER" mkdir -p /tmp/rendered

@@ -1,0 +1,63 @@
+{#- BGP peer-group, as zebra-rs `set` statements.
+    Port of dockers/docker-fpm-frr/frr/bgpd/templates/general/peer-group.conf.j2.
+
+    zebra-rs calls this a `neighbor-group`, and its shape differs from
+    FRR's peer-group in one way that matters: the inbound/outbound route
+    policy is a **group-level** `policy in|out` leaf, not a per-AFI one.
+    FRR applies `route-map ... in` inside each `address-family` block, so
+    a v4 and a v6 policy can differ on the same group. SONiC does not use
+    that freedom here — PEER_V4 and PEER_V6 are separate groups, each
+    with one family — so the flattening is lossless for these templates.
+    It would not be for a group carrying both families.
+
+    Paths verified against a running daemon; several plausible spellings
+    are rejected (`afi-safi <af> policy in`, `allowas-in 1`,
+    `soft-reconfiguration inbound`), and a rejected line is reported by
+    `vtyctl apply` with exit 0, so guessing here fails quietly.
+
+    Mapping, FRR -> zebra-rs:
+
+      neighbor PG peer-group             -> neighbor-group PG
+      neighbor PG route-map RM in        -> neighbor-group PG policy in RM
+      neighbor PG route-map RM out       -> neighbor-group PG policy out RM
+      neighbor PG allowas-in 1           -> neighbor-group PG allowas-in count 1
+      (per-AF) neighbor PG activate      -> neighbor-group PG afi-safi <af> enabled true
+      table-map RM (per-AF)              -> afi-safi <af> table-map RM
+
+    GAP — soft-reconfiguration inbound. FRR's templates set it on both
+    peer-groups unconditionally; zebra-rs has the capability internally
+    (bgp/peer.rs) but exposes no config leaf for it, so it cannot be
+    requested here. zebra-rs keeps received routes for its own soft-reset
+    handling, so the operational effect is expected to be nil — but it is
+    an unverified assumption, not a checked equivalence, and it belongs
+    on the list of things to confirm before this replaces FRR in
+    production. -#}
+set router bgp neighbor-group PEER_V4
+set router bgp neighbor-group PEER_V6
+{#- allowas-in: ToR always, Leaf only when BBR is on. Same conditions as
+    the FRR template, so the two stay in step if either is edited. -#}
+{%- if CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'ToRRouter' %}
+set router bgp neighbor-group PEER_V4 allowas-in count 1
+set router bgp neighbor-group PEER_V6 allowas-in count 1
+{%- elif CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'LeafRouter' %}
+{%- if CONFIG_DB__BGP_BBR['status'] == 'enabled' %}
+set router bgp neighbor-group PEER_V4 allowas-in count 1
+set router bgp neighbor-group PEER_V6 allowas-in count 1
+{%- endif %}
+{%- endif %}
+set router bgp neighbor-group PEER_V4 policy in FROM_BGP_PEER_V4
+set router bgp neighbor-group PEER_V4 policy out TO_BGP_PEER_V4
+set router bgp neighbor-group PEER_V4 afi-safi ipv4 enabled true
+set router bgp neighbor-group PEER_V6 policy in FROM_BGP_PEER_V6
+set router bgp neighbor-group PEER_V6 policy out TO_BGP_PEER_V6
+set router bgp neighbor-group PEER_V6 afi-safi ipv6 enabled true
+{#- Selective route download: an upstream line card / upper spine keeps
+    the full table in BGP but installs only a filtered subset into the
+    FIB. In zebra-rs this is a global per-AFI table-map, matching FRR's
+    placement inside the address-family block. -#}
+{%- if (CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'SpineRouter'
+        and CONFIG_DB__DEVICE_METADATA['localhost']['subtype'] == 'UpstreamLC')
+       or CONFIG_DB__DEVICE_METADATA['localhost']['type'] == 'UpperSpineRouter' %}
+set router bgp afi-safi ipv4 table-map SELECTIVE_ROUTE_DOWNLOAD_V4
+set router bgp afi-safi ipv6 table-map SELECTIVE_ROUTE_DOWNLOAD_V6
+{%- endif %}
