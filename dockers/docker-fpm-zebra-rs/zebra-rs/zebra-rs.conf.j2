@@ -47,11 +47,6 @@
                                   preserve-fw-state / disable / LLGR
                                   stale-time) is implemented and emitted
                                   below.
-      * suppress-fib-pending    - the offload ack is ingested and the RIB
-                                  carries `offloaded`, but advertisement is
-                                  not gated on it yet. Dropped rather than
-                                  refused: it is on EVERY SONiC device, so
-                                  refusing would mean no deployment starts.
       * confederation
         identifier / peers      - disaggregated T2 / Regional Hub only.
       * coalesce-time           - dualtor only; update-packing tuning.
@@ -192,12 +187,13 @@ UNSUPPORTED-confederation-identifier {{ BGP_DEVICE_GLOBAL['CONFED']['asn'] }}
 UNSUPPORTED-confederation-peers
 {% endif %}
 {% endif %}
-{# `bgp suppress-fib-pending` is on every SONiC device. Dropped, not
-   refused — refusing would mean no deployment starts at all. The offload
-   ack is already ingested and the RIB carries `offloaded`; what is
-   missing is gating advertisement on it. Until then this box advertises
-   a prefix before the ASIC has programmed it, which is the blackhole
-   window the knob exists to close. #}
+{# `bgp suppress-fib-pending` is on every SONiC device, and is now
+   implemented: a prefix is held out of the Adj-RIB-Out until fpmsyncd
+   acknowledges the install, so this box no longer advertises
+   reachability the ASIC has not programmed. Withdrawals are never
+   suppressed. A lost ack releases on a timeout rather than suppressing
+   forever. See ../zebra-rs/docs/design/bgp-suppress-fib-pending.md. #}
+set router bgp suppress-fib-pending true
 {% if constants.bgp.multipath_relax.enabled is defined and constants.bgp.multipath_relax.enabled %}
 set router bgp afi-safi ipv4 bestpath as-path multipath-relax true
 set router bgp afi-safi ipv6 bestpath as-path multipath-relax true
