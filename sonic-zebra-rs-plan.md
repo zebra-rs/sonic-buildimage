@@ -1,7 +1,22 @@
 # Replacing FRR with zebra-rs in SONiC — Porting Plan
 
-Status: proposal / working plan
+Status: in progress — Phases 0–3 landed, Phase 4 underway
 Scope: `sonic-buildimage` (this tree) + `zebra-rs` (`../zebra-rs`, v26.8.2)
+
+**Where this is now** (see §2 for the detail):
+
+| Phase | State |
+|---|---|
+| 0 — harness, golden traces | done (`zebra-rs/tools/fpm-tap`) |
+| 1 — FPM tee | done; encoder verified six ways, incl. byte-equality and an APPL_DB A/B diff |
+| 2 — offload ack | ack ingest done; the BGP `suppress-fib-pending` gate is **still open** |
+| 3 — `docker-fpm-zebra-rs` | done; boots on VS, runs eBGP, selected by `SONIC_ROUTING_STACK=zebra-rs` |
+| 4 — config bridge | bgpcfgd backend done; **2 of 6** template families ported |
+| 7 — packaging | `.deb` + image build; the **full SONiC build has never been run** |
+
+The live gap list lives in `../zebra-rs/docs/design/bgp-sonic-gaps.md`, which
+records for each item what was tried and how it was established. §2 below is the
+plan-level summary of it.
 
 ---
 
@@ -169,8 +184,7 @@ Derived from `dockers/docker-fpm-frr/frr/bgpd/**` and the bgpcfgd managers.
 
 **Already present in zebra-rs** (verified in `zebra-rs/src/bgp/` and `zebra-rs/yang/`):
 peer-groups (`zebra-bgp-neighbor-group.yang`), `allowas-in`, `route-reflector-client`,
-`next-hop-self`, `soft-reconfiguration` (`bgp/peer.rs`, `bgp/route.rs`),
-`maximum-paths`, add-path (`bgp/cap.rs`), graceful restart + LLGR
+`next-hop-self`, `maximum-paths`, graceful restart + LLGR
 (`zebra-bgp-afi-knobs.yang`), `update-source`/`ebgp-multihop`
 (`zebra-bgp-transport.yang`), dynamic neighbors / listen-range
 (`zebra-bgp-dynamic-neighbors.yang`), `table-map` (`zebra-bgp-table-map.yang`),
@@ -179,19 +193,91 @@ prefix-list, as-path-set (FRR-regex compatible, `yang/config.yang:4819-4835`),
 community / large-community / ext-community, `advertise-all-vni`
 (`zebra-bgp-evpn.yang`), BFD, MD5/auth, VRF/L3VPN, SRv6, EVPN, IS-IS, OSPF.
 
-**Gaps to close** (no hits in source or YANG):
+> **Two entries were struck from this list by the porting work.** An earlier
+> revision listed `soft-reconfiguration` and `add-path` as present on the strength
+> of grepping `src/bgp/`. Both were half-true, and the half that was missing is the
+> half SONiC needs. `soft-reconfiguration` exists as an internal capability with
+> **no config leaf** — it cannot be requested. `add-path` existed on a *neighbor*
+> but not on a *neighbor-group*, which is the only form that reaches a listen
+> range's dynamic members (now closed). **A capability in the source is not a
+> config surface**; only a live `vtyctl apply` that is not rejected proves the
+> latter.
 
-| Gap | Where SONiC needs it | Phase |
+### 2.1 Method — how these are established
+
+Two traps that produced wrong entries here, both now guarded against:
+
+- **`vtyctl apply` exits 0 when the daemon rejects a line.** It prints
+  `error reply: <line>` on the stream and returns success. An exit-code-only check
+  reports everything as supported. `validate-templates.sh` greps for that marker.
+- **A commit is atomic, so a batch probe blames the wrong line.** One bad line
+  discards the batch and every construct in it looks unsupported. This is how
+  `add-path` came to be listed as a gap: the probe's second line said `peer-as`
+  where zebra-rs spells it `remote-as`. Probe one construct per commit.
+
+### 2.2 Infrastructure gaps
+
+| Gap | Where SONiC needs it | Phase | State |
+|---|---|---|---|
+| FPM client / encoder | everything | 1 | **done** |
+| Offload-ack ingest + route "offloaded" state | `suppress-fib-pending` | 2 | **done** |
+| `bgp suppress-fib-pending` semantics (gate advertisement on FIB ack) | `bgpd.main.conf.j2:110` | 2 | open — last piece of Phase 2 |
+| `bestpath as-path multipath-relax` | `bgpd.main.conf.j2:120` | 4 | not yet checked |
+| BMP client (`bmp targets` / `bmp monitor` / `bmp connect`) | `bgpd.main.conf.j2:145-155`, `docker-sonic-bmp` | 8 | open (optional) |
+| FRR-schema JSON emulation | 416 `vtysh` call sites | 5 | not started |
+| EOIU / end-of-RIB signalling to STATE_DB | warm reboot | 6 | not started |
+| SONiC private FPM types (SRv6 localsid, PIC context, SRv6 VPN route, EVPN MH) | SRv6/EVPN features | 8 | not started |
+| `aggregate-address` (confirm; `managers_aggregate_address` uses it) | bgpcfgd | 4 | not yet checked |
+
+### 2.3 BGP config gaps blocking Phase 4 template families
+
+Full detail — what was tried, what exists already, and the enforcement semantics
+each one needs — is in `../zebra-rs/docs/design/bgp-sonic-gaps.md`.
+
+| Gap | Blocks | State |
 |---|---|---|
-| FPM client / encoder | everything | 1 |
-| Offload-ack ingest + route "offloaded" state | `suppress-fib-pending` | 2 |
-| `bgp suppress-fib-pending` semantics (gate advertisement on FIB ack) | `bgpd.main.conf.j2:110` | 2 |
-| `bestpath as-path multipath-relax` | `bgpd.main.conf.j2:120` | 4 |
-| BMP client (`bmp targets` / `bmp monitor` / `bmp connect`) | `bgpd.main.conf.j2:145-155`, `docker-sonic-bmp` | 8 (optional) |
-| FRR-schema JSON emulation | 416 `vtysh` call sites | 5 |
-| EOIU / end-of-RIB signalling to STATE_DB | warm reboot | 6 |
-| SONiC private FPM types (SRv6 localsid, PIC context, SRv6 VPN route, EVPN MH) | SRv6/EVPN features | 8 |
-| `aggregate-address` (confirm; `managers_aggregate_address` uses it) | bgpcfgd | 4 |
+| `maximum-prefix` | `monitors`, `sentinels` | **open — highest value.** No implementation at all: no prefix counting in `src/bgp/`, and the `prefix-limit-config-common` YANG grouping exists but nothing `uses` it. A real feature (per-family counting, threshold warning, Cease/Maximum-Prefix teardown, idle-time), not plumbing. Needs the group surface too. |
+| `send-community` | `monitors` | open. Worth establishing first whether zebra-rs already sends communities unconditionally — if so this is a no-op compatibility leaf, not behaviour. |
+| `update-source <interface>` | `monitors` | open. The address form works; the interface form is rejected. SONiC uses the interface form so the source follows the loopback. |
+| `soft-reconfiguration inbound` | `general`, `sentinels`, `dynamic` | open, and **silently dropped** rather than refused. The assumption that zebra-rs's own soft-reset handling makes this a no-op is untested — most likely of the degraded set to be harmless, most embarrassing to be wrong about. |
+| per-neighbour `keepalive` | any tuned timer | open, silently degraded. zebra-rs derives keepalive from hold time (RFC 4271); bgpcfgd's own `timers_1` fixture sets keepalive 5 with a default hold time, which ports to 60. |
+| `set ipv6 next-hop prefer-global` | `general` policy | open, silently degraded. |
+| `clear bgp peer-group <pg> soft in` | BBR manager | open. The backend refuses rather than widening to `clear bgp all` — soft-clearing every session because one group changed is an availability event. |
+
+**Closed during the port:**
+
+| Gap | Note |
+|---|---|
+| `call` (policy chaining) | Implemented, no depth limit — graph resolution with exact cycle detection (`docs/design/policy-call.md`). Needed because `managers_allow_list.py` owns the callee at runtime, so it cannot be flattened at render time. |
+| `set tag` / `match tag` | Implemented. SONiC stamps on ingress, matches on egress. |
+| `add-path` on a neighbor-group | Implemented. Load-bearing: the sentinels group is a listen range, so its members are materialized on accept and no per-neighbor statement exists to carry the capability. |
+| `on-match next` | Was never missing — it is `action next`. Recorded because refusing it would have denied working policy to every upstream line card. |
+
+**Verified-config, unverified-behaviour** — the class most likely to bite, because
+nothing errors:
+
+- **RFC 7911 `send` vs FRR `addpath-tx-all-paths`.** `send` says the capability is
+  advertised, not which paths are selected. FRR distinguishes tx-all-paths from
+  tx-bestpath-per-AS and the sentinel wants *all* paths. If zebra-rs sends only the
+  bestpath, the config commits, the capability negotiates, and the sentinel quietly
+  sees less than it asked for. Needs a live two-path session and a count of what
+  crosses the wire.
+
+### 2.4 Phase 4 template families
+
+| Family | State |
+|---|---|
+| `general` | **ported**, all fixtures accepted by a live daemon |
+| `dynamic` (BGP_SPEAKER) | **ported** |
+| `sentinels` | blocked: `maximum-prefix`, `soft-reconfiguration` (`add-path` now closed) |
+| `monitors` | blocked: `maximum-prefix`, `send-community`, `update-source <interface>` |
+| `voq_chassis` | **not yet read** |
+| `internal` | **not yet read** (uses `set tag`, which now exists) |
+
+`managers_allow_list.py` (785 lines) is **not ported**: it emits FRR syntax and
+parses FRR's running-config to allocate sequence numbers, so it needs a dialect
+abstraction. The `general` template lays down the static half of the allow-list
+chain, which makes that half correct but does not make the feature work.
 
 ---
 
@@ -514,18 +600,18 @@ shippable.
 
 ## 4. Sequencing summary
 
-| Phase | Outcome | Blocks |
-|---|---|---|
-| 0 | FPM recorder + golden traces + replay harness | 1 |
-| 1 | FPM tee in zebra-rs; routes reach APPL_DB byte-identically | 2, 3 |
-| 2 | Offload ack + `suppress-fib-pending` | 3 |
-| 3 | `docker-fpm-zebra-rs` boots on VS; eBGP works | 4, 5 |
-| 4 | CONFIG_DB → zebra-rs bridge (bgpcfgd backend + templates) | 5, 6 |
-| 5 | `vtysh` shim + FRR-schema JSON; tooling works | 6, 9 |
-| 6 | Warm/fast reboot, GR, TSA | 9 |
-| 7 | `.deb` + docker + CI in sonic-buildimage | 9 |
-| 8 | VRF, SRv6, EVPN, BMP, multi-ASIC | 9 |
-| 9 | sonic-mgmt, scale, hardware, default flip | — |
+| Phase | Outcome | Blocks | State |
+|---|---|---|---|
+| 0 | FPM recorder + golden traces + replay harness | 1 | done |
+| 1 | FPM tee in zebra-rs; routes reach APPL_DB byte-identically | 2, 3 | done |
+| 2 | Offload ack + `suppress-fib-pending` | 3 | ack done; BGP gate open |
+| 3 | `docker-fpm-zebra-rs` boots on VS; eBGP works | 4, 5 | done |
+| 4 | CONFIG_DB → zebra-rs bridge (bgpcfgd backend + templates) | 5, 6 | backend done; 2/6 families |
+| 5 | `vtysh` shim + FRR-schema JSON; tooling works | 6, 9 | not started |
+| 6 | Warm/fast reboot, GR, TSA | 9 | not started |
+| 7 | `.deb` + docker + CI in sonic-buildimage | 9 | builds; full `make` never run |
+| 8 | VRF, SRv6, EVPN, BMP, multi-ASIC | 9 | not started |
+| 9 | sonic-mgmt, scale, hardware, default flip | — | not started |
 
 Phases 4 and 5 are independent of each other and can run in parallel once Phase 3
 lands; 7 can start as soon as Phase 3's image layout is settled.
@@ -553,3 +639,20 @@ lands; 7 can start as soon as Phase 3's image layout is settled.
    (Phase 6), not manually at the end.
 4. **Scale regressions found late** — measure at Phase 3 (rough) and Phase 9
    (rigorous), not only at the end.
+5. **Silent behavioural divergence** — the risk this plan originally missed, and
+   the one the Phase-4 work keeps surfacing. A construct that is *accepted* is not
+   a construct that *behaves the same*: `add-path send` may advertise only the
+   bestpath where FRR's `addpath-tx-all-paths` sends all of them; a dropped
+   `soft-reconfiguration` or `keepalive` changes behaviour with nothing in any log.
+   Config-level validation cannot see any of it. *Mitigation:* keep the
+   "silently degraded" and "verified-config, unverified-behaviour" lists in §2.3
+   explicit, and close each with a **live measurement** — a session, a packet
+   count, a timer — rather than by reasoning about it. Every entry there is a
+   deployment that works and is subtly wrong.
+6. **The full SONiC build has never been run** — the `.deb`, the image, and the
+   runtime were each validated directly, but `make` on the build slave has not
+   exercised `rules/zebra-rs.mk` / `rules/docker-fpm-zebra-rs.mk`. Most likely
+   place for an unpleasant surprise, and cheap to retire. Related: zebra-rs
+   gitignores its lock file, so `src/sonic-zebra-rs/Cargo.lock` is what makes a
+   given SONiC commit reproducible and must be refreshed deliberately whenever the
+   submodule SHA moves.
