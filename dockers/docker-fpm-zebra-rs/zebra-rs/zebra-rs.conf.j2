@@ -40,12 +40,6 @@
     The instance-level knobs zebra-rs has are `as` and `router-id`. That
     is the whole of `/router/bgp/global`. In particular:
 
-      * maximum-paths           - NOT a missing leaf: BGP multipath is not
-                                  implemented. `make_bgp_rib_entry_v4`
-                                  takes the single bestpath and builds one
-                                  `Nexthop::Uni`. See the loud refusal
-                                  below; this is the one that changes
-                                  forwarding.
       * graceful-restart        - only per-neighbor, per-AF. The global
         (+ restart-time,          knobs SONiC sets on a ToRRouter, and the
         preserve-fw-state,        `graceful-restart-disable` / LLGR
@@ -56,8 +50,6 @@
                                   not gated on it yet. Dropped rather than
                                   refused: it is on EVERY SONiC device, so
                                   refusing would mean no deployment starts.
-      * bestpath as-path
-        multipath-relax         - moot while multipath is absent.
       * confederation
         identifier / peers      - disaggregated T2 / Regional Hub only.
       * coalesce-time           - dualtor only; update-packing tuning.
@@ -205,7 +197,8 @@ UNSUPPORTED-confederation-peers
    a prefix before the ASIC has programmed it, which is the blackhole
    window the knob exists to close. #}
 {% if constants.bgp.multipath_relax.enabled is defined and constants.bgp.multipath_relax.enabled %}
-UNSUPPORTED-bestpath-as-path-multipath-relax
+set router bgp afi-safi ipv4 bestpath as-path multipath-relax true
+set router bgp afi-safi ipv6 bestpath as-path multipath-relax true
 {% endif %}
 {% if constants.bgp.graceful_restart.enabled is defined and constants.bgp.graceful_restart.enabled
       and DEVICE_METADATA['localhost']['type'] == 'ToRRouter' %}
@@ -276,12 +269,19 @@ set router bgp afi-safi ipv4 redistribute connected policy V4_CONNECTED_ROUTES
 set router bgp afi-safi ipv6 redistribute connected policy V6_CONNECTED_ROUTES
 {% endif %}
 {# ---- maximum-paths ----
-   The one that changes forwarding. zebra-rs does not implement BGP
-   multipath at all: make_bgp_rib_entry_v4 takes the single bestpath and
-   builds one Nexthop::Uni, so a device with several equal-cost upstream
-   peers would install ONE of them and quietly forward all traffic over a
-   single link. SONiC enables this on T0/T1 by default. Refused. #}
+   The knob that decides whether a device with several equal-cost
+   upstreams uses all of them. zebra-rs had no BGP multipath at all when
+   this template was first written — it installed the single best path —
+   so this was refused; it is now implemented (see
+   ../zebra-rs/docs/design/bgp-multipath.md) and expressible.
+
+   Note the default differs from FRR in one respect worth knowing: a path
+   qualifies as equal-cost only if it also shares the same neighbouring
+   AS, unless multipath-relax is on above. FRR behaves the same way, but
+   zebra-rs's best-path ladder never compares AS-path content, so the
+   strictness is explicit rather than inherited. #}
 {% if constants.bgp.maximum_paths.enabled is defined and constants.bgp.maximum_paths.enabled %}
-UNSUPPORTED-maximum-paths-bgp-multipath-not-implemented
+set router bgp afi-safi ipv4 maximum-paths {{ constants.bgp.maximum_paths.ipv4 | default(64) }}
+set router bgp afi-safi ipv6 maximum-paths {{ constants.bgp.maximum_paths.ipv6 | default(64) }}
 {% endif %}
 {% endif %}

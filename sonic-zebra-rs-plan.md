@@ -11,7 +11,7 @@ Scope: `sonic-buildimage` (this tree) + `zebra-rs` (`../zebra-rs`, v26.8.2)
 | 1 — FPM tee | done; encoder verified six ways, incl. byte-equality and an APPL_DB A/B diff |
 | 2 — offload ack | ack ingest done; the BGP `suppress-fib-pending` gate is **still open** |
 | 3 — `docker-fpm-zebra-rs` | done; boots on VS, runs eBGP, selected by `SONIC_ROUTING_STACK=zebra-rs` |
-| 4 — config bridge | bgpcfgd backend done; **2 of 6** template families ported |
+| 4 — config bridge | bgpcfgd backend done; global instance template ported; **2 of 6** peer families ported |
 | 7 — packaging | `.deb` + image build; the **full SONiC build has never been run** |
 
 The live gap list lives in `../zebra-rs/docs/design/bgp-sonic-gaps.md`, which
@@ -273,7 +273,7 @@ A stock T0 hits three of these.
 
 | Gap | State |
 |---|---|
-| **BGP multipath / `maximum-paths`** | **open — the largest functional gap on the list.** Not a missing leaf: the capability is absent. `make_bgp_rib_entry_v4` takes the single bestpath and builds one `Nexthop::Uni`, so a device with several equal-cost upstream peers installs one and forwards everything over a single link. That is the normal T0/T1 topology. `bestpath as-path multipath-relax` is moot until this exists. |
+| **BGP multipath / `maximum-paths`** | **closed.** Was the largest functional gap on the list — not a missing leaf but an absent capability, installing one of several equal-cost upstreams and forwarding everything over a single link. Now computes the tie set through the eBGP/iBGP comparison, caps it, deduplicates by next-hop and installs `Nexthop::Multi`; the FPM encoder already carried it. `multipath-relax` is strict by default, since the ladder never compares AS-path content and inheriting it would have relaxed silently. See `../zebra-rs/docs/design/bgp-multipath.md`. |
 | global graceful restart | open. zebra-rs has GR only per-neighbor/per-AF; the instance-level `bgp graceful-restart`, `restart-time`, `preserve-fw-state`, `select-defer-time`, `graceful-restart-disable` and LLGR `stale-time` have no equivalent. **Phase 6 depends on this**, and `preserve-fw-state` is what makes a restart hitless. |
 | `suppress-fib-pending` | open (also §2.2). On every device, so the template drops it rather than refusing — until it lands, a box advertises a prefix before the ASIC has programmed it. |
 | `network <prefix> route-map <rm>` | open. `network` exists but takes no policy. SONiC uses the policy form to attach `no-export` to an internal loopback before originating it, so degrading would leak an internal prefix outside the fabric. Refused. |
