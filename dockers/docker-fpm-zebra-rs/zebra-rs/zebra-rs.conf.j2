@@ -40,11 +40,13 @@
     The instance-level knobs zebra-rs has are `as` and `router-id`. That
     is the whole of `/router/bgp/global`. In particular:
 
-      * graceful-restart        - only per-neighbor, per-AF. The global
-        (+ restart-time,          knobs SONiC sets on a ToRRouter, and the
-        preserve-fw-state,        `graceful-restart-disable` / LLGR
-        select-defer-time)        stale-time an UpperRegionalHub sets, have
-                                  no equivalent.
+      * graceful-restart
+        select-defer-time       - the restarting-speaker deferral does not
+                                  exist. The rest of graceful restart
+                                  (enable / restart-time /
+                                  preserve-fw-state / disable / LLGR
+                                  stale-time) is implemented and emitted
+                                  below.
       * suppress-fib-pending    - the offload ack is ingested and the RIB
                                   carries `offloaded`, but advertisement is
                                   not gated on it yet. Dropped rather than
@@ -202,11 +204,21 @@ set router bgp afi-safi ipv6 bestpath as-path multipath-relax true
 {% endif %}
 {% if constants.bgp.graceful_restart.enabled is defined and constants.bgp.graceful_restart.enabled
       and DEVICE_METADATA['localhost']['type'] == 'ToRRouter' %}
-UNSUPPORTED-bgp-graceful-restart-global
+set router bgp graceful-restart enabled true
+set router bgp graceful-restart restart-time {{ constants.bgp.graceful_restart.restart_time | default(240) }}
+set router bgp graceful-restart preserve-fw-state true
+{# `select-defer-time` bounds how long a RESTARTING speaker defers
+   best-path selection so it does not announce a partial table. zebra-rs
+   implements the GR helper role (a restarting peer's routes are retained
+   and marked stale, with LLGR) but has no deferral of its own restart,
+   so the timer has nothing to govern. Refused rather than accepted-and-
+   ignored: a timer that silently does nothing is the failure mode this
+   port keeps finding. #}
+UNSUPPORTED-bgp-graceful-restart-select-defer-time {{ constants.bgp.graceful_restart.select_defer_time | default(45) }}
 {% endif %}
 {% if DEVICE_METADATA['localhost']['type'] == 'UpperRegionalHub' %}
-UNSUPPORTED-bgp-graceful-restart-disable
-UNSUPPORTED-bgp-long-lived-graceful-restart-stale-time
+set router bgp graceful-restart disable true
+set router bgp long-lived-graceful-restart stale-time 864000
 {% endif %}
 {% if (FEATURE is defined) and
       (('frr_bmp' in FEATURE and 'state' in FEATURE['frr_bmp'] and FEATURE['frr_bmp']['state'] == 'enabled') or
