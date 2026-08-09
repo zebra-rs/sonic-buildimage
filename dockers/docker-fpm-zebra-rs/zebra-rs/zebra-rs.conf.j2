@@ -1,20 +1,97 @@
 {#- zebra-rs startup configuration, rendered from CONFIG_DB.
 
-    Deliberately minimal for now: it turns on the FPM tee, which is what
-    makes this container program the ASIC at all, and sets the router-id
-    and local AS when CONFIG_DB has them. Neighbours, policy and the rest
-    of the BGP configuration follow in the CONFIG_DB bridge (the
-    bgpcfgd backend swap), which is where SONiC's existing per-role
-    templates get translated.
+    Port of dockers/docker-fpm-frr/frr/bgpd/bgpd.main.conf.j2 (the global
+    BGP instance) plus the daemon-level settings that have no FRR
+    counterpart. Per-peer configuration arrives later over the CONFIG_DB
+    bridge (bgpcfgd + the per-role template families); this file is what
+    the instance those peers live in is built from.
 
     Format is the daemon's `set` line syntax, which `zebra-rs -c` reads
-    directly. -#}
+    directly.
+
+    Mapping, FRR -> zebra-rs (each verified against a running daemon):
+
+      ip prefix-list N permit P            -> set prefix-set N prefixes P
+      ip prefix-list N permit P ge X le Y  -> set prefix-set N prefixes P ge X
+                                            + set prefix-set N prefixes P le Y
+      route-map N permit S                 -> set policy N entry S action permit
+        + on-match next                    -> set policy N entry S action next
+      match ip address prefix-list PS      -> set policy N entry S match prefix-set PS
+      call RM                              -> set policy N entry S call RM
+      set community C additive             -> set policy N entry S set community name CS
+                                            + set policy N entry S set community additive
+      network P (per address-family)       -> set router bgp afi-safi <af> network P
+      redistribute connected route-map RM  -> set router bgp afi-safi <af> redistribute
+                                              connected policy RM
+      bgp router-id X                      -> set router bgp global router-id X
+
+    `ge` and `le` are separate leaves of the same `prefixes` entry, so
+    they go on separate lines — `prefixes P ge X le Y` on one line is
+    rejected, and because a commit is atomic that rejection discards the
+    whole file.
+
+    ---------------------------------------------------------------------
+    NOT EXPRESSIBLE. Every one of these was probed against a running
+    daemon, one construct per commit on top of a known-good preamble, and
+    rejected; each was then confirmed absent from the schema rather than
+    merely misspelled. They are recorded in
+    ../zebra-rs/docs/design/bgp-sonic-gaps.md.
+
+    The instance-level knobs zebra-rs has are `as` and `router-id`. That
+    is the whole of `/router/bgp/global`. In particular:
+
+      * maximum-paths           - NOT a missing leaf: BGP multipath is not
+                                  implemented. `make_bgp_rib_entry_v4`
+                                  takes the single bestpath and builds one
+                                  `Nexthop::Uni`. See the loud refusal
+                                  below; this is the one that changes
+                                  forwarding.
+      * graceful-restart        - only per-neighbor, per-AF. The global
+        (+ restart-time,          knobs SONiC sets on a ToRRouter, and the
+        preserve-fw-state,        `graceful-restart-disable` / LLGR
+        select-defer-time)        stale-time an UpperRegionalHub sets, have
+                                  no equivalent.
+      * suppress-fib-pending    - the offload ack is ingested and the RIB
+                                  carries `offloaded`, but advertisement is
+                                  not gated on it yet. Dropped rather than
+                                  refused: it is on EVERY SONiC device, so
+                                  refusing would mean no deployment starts.
+      * bestpath as-path
+        multipath-relax         - moot while multipath is absent.
+      * confederation
+        identifier / peers      - disaggregated T2 / Regional Hub only.
+      * coalesce-time           - dualtor only; update-packing tuning.
+      * log-neighbor-changes    - cosmetic.
+      * network P route-map RM  - `network` exists but takes no policy, so
+                                  the community that marks an internal
+                                  route cannot be attached at origination.
+      * bmp *                   - Phase 8; the FEATURE-gated block is
+                                  refused below rather than dropped.
+
+    Two FRR lines are deliberately NOT ported and NOT refused, because
+    they turn off FRR behaviours zebra-rs does not have in the first
+    place: `no bgp default ipv4-unicast` (zebra-rs activates a family only
+    when configured) and `no bgp ebgp-requires-policy` (zebra-rs has no
+    RFC 8212 enforcement to disable). Porting them as no-ops would imply a
+    knob exists.
+
+    HOW REFUSAL WORKS: an `UNSUPPORTED-` token is not valid config, so the
+    daemon rejects the line and — commits being atomic — the whole file.
+    That is deliberate. Silently dropping a knob that changes forwarding
+    or convergence produces a box that looks healthy and behaves
+    differently; failing the render is loud, and validate-templates.sh
+    recognises the marker as refused-by-design rather than a broken path.
+    -#}
+{% from "common/functions.conf.j2" import get_ipv4_loopback_address, get_ipv6_loopback_address, get_vnet_interfaces %}
 # Generated by docker_init.sh from CONFIG_DB. Do not edit by hand.
 #
 # The FPM tee is what carries routes to fpmsyncd -> APPL_DB -> orchagent.
 # Address and port default to 127.0.0.1:2620, where fpmsyncd listens in
 # this container.
 set system fpm enabled true
+{% set lo0_ipv4 = get_ipv4_loopback_address(LOOPBACK_INTERFACE, "Loopback0") | ip %}
+{% set lo4096_ipv4 = get_ipv4_loopback_address(LOOPBACK_INTERFACE, "Loopback4096") | ip %}
+{% set lo0_ipv6 = get_ipv6_loopback_address(LOOPBACK_INTERFACE, "Loopback0") %}
 {% if DEVICE_METADATA is defined and DEVICE_METADATA['localhost'] is defined %}
 {% set meta = DEVICE_METADATA['localhost'] %}
 {% if meta['bgp_router_id'] is defined %}
@@ -23,10 +100,188 @@ set system router-id {{ meta['bgp_router_id'] }}
 {% if meta['hostname'] is defined %}
 set system hostname {{ meta['hostname'] }}
 {% endif %}
-{% if meta['bgp_asn'] is defined and meta['bgp_asn'] | lower not in ['none', 'null'] %}
-set router bgp global as {{ meta['bgp_asn'] }}
-{% if meta['bgp_router_id'] is defined %}
-set router bgp global router-id {{ meta['bgp_router_id'] }}
 {% endif %}
+{# ---- role detection, mirroring bgpd.main.conf.j2 so the two stay in step ---- #}
+{% set disagg_t2 = "false" %}
+{% set disagg_rh = "false" %}
+{% if (DEVICE_METADATA is defined) and ('localhost' in DEVICE_METADATA) and ('type' in DEVICE_METADATA['localhost']) %}
+{% if DEVICE_METADATA['localhost']['type'].lower() in ['lowerspinerouter', 'upperspinerouter', 'fabricspinerouter'] %}
+{% set disagg_t2 = "true" %}
+{% endif %}
+{% if DEVICE_METADATA['localhost']['type'].lower() in ['lowerregionalhub', 'fabricregionalhub', 'upperregionalhub'] %}
+{% set disagg_rh = "true" %}
+{% endif %}
+{% endif %}
+{% if DEVICE_METADATA['localhost']['sub_role'] == 'FrontEnd' or DEVICE_METADATA['localhost']['sub_role'] == 'BackEnd' %}
+{% set multi_asic = True %}
+{% endif %}
+{% if DEVICE_METADATA['localhost']['switch_type'] == 'voq' and ('chassisdb_conf_present' in DEVICE_METADATA['localhost'] or
+      '/usr/share/sonic/platform/chassisdb.conf' | file_exists) %}
+{% set voq_chassis = True %}
+{% endif %}
+{# ---- loopback prefix-sets ---- #}
+{% if lo0_ipv4 is not none %}
+set prefix-set PL_LoopbackV4 prefixes {{ lo0_ipv4 }}/32
+{% endif %}
+{% if lo0_ipv6 != 'None' %}
+{% if ( ('localhost' in DEVICE_METADATA) and ('bgp_adv_lo_prefix_as_128' in DEVICE_METADATA['localhost']) and
+        (DEVICE_METADATA['localhost']['bgp_adv_lo_prefix_as_128'] == 'true') ) %}
+set prefix-set PL_LoopbackV6 prefixes {{ lo0_ipv6 | ip_network }}/128
+{% else %}
+set prefix-set PL_LoopbackV6 prefixes {{ lo0_ipv6 | replace('/128', '/64') | ip_network }}/64
+{% endif %}
+{% endif %}
+{# ---- local VLAN prefix-sets ----
+   FRR allocates explicit `seq` numbers here. zebra-rs's prefix-set is a
+   set keyed by prefix with no sequence: entries are match-any, so order
+   carries no meaning and the numbering has nothing to express. #}
+{% if VLAN_INTERFACE is defined %}
+{% set vnet_intfs = get_vnet_interfaces(VLAN_INTERFACE) %}
+{% endif %}
+{% for (name, prefix) in VLAN_INTERFACE|pfx_filter %}
+{% if prefix | ipv4 and name not in vnet_intfs %}
+set prefix-set LOCAL_VLAN_IPV4_PREFIX prefixes {{ prefix | ip_network }}/{{ prefix | prefixlen }}
+{% endif %}
+{% endfor %}
+{% for (name, prefix) in VLAN_INTERFACE|pfx_filter %}
+{% if prefix | ipv6 and name not in vnet_intfs %}
+set prefix-set LOCAL_VLAN_IPV6_PREFIX prefixes {{ prefix | ip_network }}/{{ prefix | prefixlen }}
+{% endif %}
+{% endfor %}
+{# ---- internal-route hiding, for multi-ASIC / VoQ / packet chassis ---- #}
+{% if multi_asic is defined or voq_chassis is defined or DEVICE_METADATA['localhost']['switch_type'] == 'chassis-packet' %}
+set prefix-set V4_P2P_IP prefixes 0.0.0.0/0 ge 31
+set prefix-set V4_P2P_IP prefixes 0.0.0.0/0 le 31
+set prefix-set V6_P2P_IP prefixes ::/0 ge 126
+set prefix-set V6_P2P_IP prefixes ::/0 le 126
+set policy V4_CONNECTED_ROUTES entry 10 action permit
+set policy V4_CONNECTED_ROUTES entry 10 match prefix-set V4_P2P_IP
+set policy V4_CONNECTED_ROUTES entry 10 call HIDE_INTERNAL
+set policy V6_CONNECTED_ROUTES entry 10 action permit
+set policy V6_CONNECTED_ROUTES entry 10 match prefix-set V6_P2P_IP
+set policy V6_CONNECTED_ROUTES entry 10 call HIDE_INTERNAL
+{# FRR sets an inline `community no-export`; zebra-rs references a named
+   set, so define one. #}
+set community-set NO_EXPORT members no-export
+{% if (disagg_t2 == "true" and constants.bgp.hide_internal_community is defined)
+      or (constants.bgp.peers is defined and constants.bgp.peers.internal is defined
+          and constants.bgp.peers.internal.community is defined) %}
+set policy HIDE_INTERNAL entry 10 action next
+set policy HIDE_INTERNAL entry 10 set community name NO_EXPORT
+set policy HIDE_INTERNAL entry 10 set community additive
+{% if disagg_t2 == "true" and constants.bgp.hide_internal_community is defined %}
+set community-set HIDE_INTERNAL_COMMUNITY members {{ constants.bgp.hide_internal_community }}
+set policy HIDE_INTERNAL entry 20 action permit
+set policy HIDE_INTERNAL entry 20 set community name HIDE_INTERNAL_COMMUNITY
+set policy HIDE_INTERNAL entry 20 set community additive
+{% else %}
+set community-set INTERNAL_PEER_COMMUNITY members {{ constants.bgp.peers.internal.community }}
+set policy HIDE_INTERNAL entry 20 action permit
+set policy HIDE_INTERNAL entry 20 set community name INTERNAL_PEER_COMMUNITY
+set policy HIDE_INTERNAL entry 20 set community additive
+{% endif %}
+{% else %}
+set policy HIDE_INTERNAL entry 10 action permit
+set policy HIDE_INTERNAL entry 10 set community name NO_EXPORT
+set policy HIDE_INTERNAL entry 10 set community additive
+{% endif %}
+{% endif %}
+{# ---- the BGP instance ---- #}
+{% if (DEVICE_METADATA is defined) and ('localhost' in DEVICE_METADATA) and ('bgp_asn' in DEVICE_METADATA['localhost'])
+      and (DEVICE_METADATA['localhost']['bgp_asn'].lower() != 'none') and (DEVICE_METADATA['localhost']['bgp_asn'].lower() != 'null') %}
+set router bgp global as {{ DEVICE_METADATA['localhost']['bgp_asn'] }}
+{% if disagg_t2 == "true" or disagg_rh == "true" %}
+{% if (BGP_DEVICE_GLOBAL is defined) and ('CONFED' in BGP_DEVICE_GLOBAL) and ('asn' in BGP_DEVICE_GLOBAL['CONFED']) %}
+UNSUPPORTED-confederation-identifier {{ BGP_DEVICE_GLOBAL['CONFED']['asn'] }}
+{% endif %}
+{% if (BGP_DEVICE_GLOBAL is defined) and ('CONFED' in BGP_DEVICE_GLOBAL) and ('peers' in BGP_DEVICE_GLOBAL['CONFED']) %}
+UNSUPPORTED-confederation-peers
+{% endif %}
+{% endif %}
+{# `bgp suppress-fib-pending` is on every SONiC device. Dropped, not
+   refused — refusing would mean no deployment starts at all. The offload
+   ack is already ingested and the RIB carries `offloaded`; what is
+   missing is gating advertisement on it. Until then this box advertises
+   a prefix before the ASIC has programmed it, which is the blackhole
+   window the knob exists to close. #}
+{% if constants.bgp.multipath_relax.enabled is defined and constants.bgp.multipath_relax.enabled %}
+UNSUPPORTED-bestpath-as-path-multipath-relax
+{% endif %}
+{% if constants.bgp.graceful_restart.enabled is defined and constants.bgp.graceful_restart.enabled
+      and DEVICE_METADATA['localhost']['type'] == 'ToRRouter' %}
+UNSUPPORTED-bgp-graceful-restart-global
+{% endif %}
+{% if DEVICE_METADATA['localhost']['type'] == 'UpperRegionalHub' %}
+UNSUPPORTED-bgp-graceful-restart-disable
+UNSUPPORTED-bgp-long-lived-graceful-restart-stale-time
+{% endif %}
+{% if (FEATURE is defined) and
+      (('frr_bmp' in FEATURE and 'state' in FEATURE['frr_bmp'] and FEATURE['frr_bmp']['state'] == 'enabled') or
+      ('bmp' in FEATURE and 'state' in FEATURE['bmp'] and FEATURE['bmp']['state'] == 'enabled')) %}
+UNSUPPORTED-bmp-targets
+{% endif %}
+{# ---- router-id ---- #}
+{% if DEVICE_METADATA['localhost']['sub_role'] == 'BackEnd' or voq_chassis is defined or DEVICE_METADATA['localhost']['switch_type'] == 'chassis-packet' %}
+{% if 'bgp_router_id' in DEVICE_METADATA['localhost'] %}
+set router bgp global router-id {{ DEVICE_METADATA['localhost']['bgp_router_id'] }}
+{% elif lo4096_ipv4 is not none %}
+set router bgp global router-id {{ lo4096_ipv4 }}
+{% endif %}
+{% else %}
+{% if 'bgp_router_id' in DEVICE_METADATA['localhost'] %}
+set router bgp global router-id {{ DEVICE_METADATA['localhost']['bgp_router_id'] }}
+{% elif lo0_ipv4 is not none %}
+set router bgp global router-id {{ lo0_ipv4 }}
+{% endif %}
+{% endif %}
+{# ---- originated networks ----
+   `network` takes no policy in zebra-rs, so the FRR forms that attach
+   `route-map HIDE_INTERNAL` cannot be expressed. Those advertise an
+   internal loopback that must carry no-export; originating it WITHOUT
+   the community would leak an internal prefix outside the fabric, which
+   is worse than not originating it. Refused rather than degraded. #}
+{% if lo0_ipv4 is not none %}
+set router bgp afi-safi ipv4 network {{ lo0_ipv4 }}/32
+{% endif %}
+{% if lo4096_ipv4 is not none and ((multi_asic is defined and DEVICE_METADATA['localhost']['switch_type'] != 'chassis-packet') or (voq_chassis is defined)) %}
+UNSUPPORTED-network-with-policy {{ lo4096_ipv4 }}/32
+{% endif %}
+{% if lo0_ipv6 != 'None' %}
+{% if ( ('localhost' in DEVICE_METADATA) and ('bgp_adv_lo_prefix_as_128' in DEVICE_METADATA['localhost']) and
+        (DEVICE_METADATA['localhost']['bgp_adv_lo_prefix_as_128'] == 'true') ) %}
+set router bgp afi-safi ipv6 network {{ lo0_ipv6 | ip }}/128
+{% else %}
+set router bgp afi-safi ipv6 network {{ lo0_ipv6 | ip }}/64
+{% if voq_chassis is defined or DEVICE_METADATA['localhost']['switch_type'] == 'chassis-packet' %}
+UNSUPPORTED-network-with-policy {{ lo0_ipv6 | ip }}/128
+{% endif %}
+{% endif %}
+{% endif %}
+{% if ((multi_asic is defined and DEVICE_METADATA['localhost']['switch_type'] != 'chassis-packet') or (voq_chassis is defined)) %}
+{% if get_ipv6_loopback_address(LOOPBACK_INTERFACE, "Loopback4096") != 'None' %}
+UNSUPPORTED-network-with-policy {{ get_ipv6_loopback_address(LOOPBACK_INTERFACE, "Loopback4096") | ip }}/128
+{% endif %}
+{% endif %}
+{# ---- VLAN advertisement ---- #}
+{% for (name, prefix) in VLAN_INTERFACE|pfx_filter %}
+{% if prefix | ipv4 and name not in vnet_intfs %}
+set router bgp afi-safi ipv4 network {{ prefix }}
+{% elif prefix | ipv6 and name not in vnet_intfs %}
+set router bgp afi-safi ipv6 network {{ prefix }}
+{% endif %}
+{% endfor %}
+{# ---- connected redistribution with the internal-hiding policy ---- #}
+{% if DEVICE_METADATA['localhost']['sub_role'] == 'FrontEnd' or voq_chassis is defined or DEVICE_METADATA['localhost']['switch_type'] == 'chassis-packet' %}
+set router bgp afi-safi ipv4 redistribute connected policy V4_CONNECTED_ROUTES
+set router bgp afi-safi ipv6 redistribute connected policy V6_CONNECTED_ROUTES
+{% endif %}
+{# ---- maximum-paths ----
+   The one that changes forwarding. zebra-rs does not implement BGP
+   multipath at all: make_bgp_rib_entry_v4 takes the single bestpath and
+   builds one Nexthop::Uni, so a device with several equal-cost upstream
+   peers would install ONE of them and quietly forward all traffic over a
+   single link. SONiC enables this on T0/T1 by default. Refused. #}
+{% if constants.bgp.maximum_paths.enabled is defined and constants.bgp.maximum_paths.enabled %}
+UNSUPPORTED-maximum-paths-bgp-multipath-not-implemented
 {% endif %}
 {% endif %}

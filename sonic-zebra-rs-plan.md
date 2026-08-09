@@ -184,7 +184,7 @@ Derived from `dockers/docker-fpm-frr/frr/bgpd/**` and the bgpcfgd managers.
 
 **Already present in zebra-rs** (verified in `zebra-rs/src/bgp/` and `zebra-rs/yang/`):
 peer-groups (`zebra-bgp-neighbor-group.yang`), `allowas-in`, `route-reflector-client`,
-`next-hop-self`, `maximum-paths`, graceful restart + LLGR
+`next-hop-self`, per-neighbor graceful restart + LLGR
 (`zebra-bgp-afi-knobs.yang`), `update-source`/`ebgp-multihop`
 (`zebra-bgp-transport.yang`), dynamic neighbors / listen-range
 (`zebra-bgp-dynamic-neighbors.yang`), `table-map` (`zebra-bgp-table-map.yang`),
@@ -193,15 +193,17 @@ prefix-list, as-path-set (FRR-regex compatible, `yang/config.yang:4819-4835`),
 community / large-community / ext-community, `advertise-all-vni`
 (`zebra-bgp-evpn.yang`), BFD, MD5/auth, VRF/L3VPN, SRv6, EVPN, IS-IS, OSPF.
 
-> **Two entries were struck from this list by the porting work.** An earlier
-> revision listed `soft-reconfiguration` and `add-path` as present on the strength
-> of grepping `src/bgp/`. Both were half-true, and the half that was missing is the
-> half SONiC needs. `soft-reconfiguration` exists as an internal capability with
-> **no config leaf** — it cannot be requested. `add-path` existed on a *neighbor*
-> but not on a *neighbor-group*, which is the only form that reaches a listen
-> range's dynamic members (now closed). **A capability in the source is not a
-> config surface**; only a live `vtyctl apply` that is not rejected proves the
-> latter.
+> **Three entries were struck from this list by the porting work.** An earlier
+> revision listed `soft-reconfiguration`, `add-path` and `maximum-paths` as present
+> on the strength of grepping `src/bgp/` and the vendored YANG. All three were
+> wrong in the same direction. `soft-reconfiguration` exists as an internal
+> capability with **no config leaf** — it cannot be requested. `add-path` existed
+> on a *neighbor* but not on a *neighbor-group*, the only form that reaches a
+> listen range's dynamic members (now closed). `maximum-paths` is the worst of the
+> three: **BGP multipath is not implemented at all** (§2.5), so it is not a leaf
+> waiting to be wired. **A string in the source, or a grouping in vendored YANG, is
+> not a config surface** — only a live `vtyctl apply` that is not rejected proves
+> that, and only a live measurement proves the behaviour behind it.
 
 ### 2.1 Method — how these are established
 
@@ -263,7 +265,26 @@ nothing errors:
   sees less than it asked for. Needs a live two-path session and a count of what
   crosses the wire.
 
-### 2.4 Phase 4 template families
+### 2.4 Instance-level gaps — every device, not just a role
+
+Found porting `bgpd.main.conf.j2` (the global BGP instance). `/router/bgp/global`
+has exactly two leaves, `as` and `router-id` — that is the whole instance surface.
+A stock T0 hits three of these.
+
+| Gap | State |
+|---|---|
+| **BGP multipath / `maximum-paths`** | **open — the largest functional gap on the list.** Not a missing leaf: the capability is absent. `make_bgp_rib_entry_v4` takes the single bestpath and builds one `Nexthop::Uni`, so a device with several equal-cost upstream peers installs one and forwards everything over a single link. That is the normal T0/T1 topology. `bestpath as-path multipath-relax` is moot until this exists. |
+| global graceful restart | open. zebra-rs has GR only per-neighbor/per-AF; the instance-level `bgp graceful-restart`, `restart-time`, `preserve-fw-state`, `select-defer-time`, `graceful-restart-disable` and LLGR `stale-time` have no equivalent. **Phase 6 depends on this**, and `preserve-fw-state` is what makes a restart hitless. |
+| `suppress-fib-pending` | open (also §2.2). On every device, so the template drops it rather than refusing — until it lands, a box advertises a prefix before the ASIC has programmed it. |
+| `network <prefix> route-map <rm>` | open. `network` exists but takes no policy. SONiC uses the policy form to attach `no-export` to an internal loopback before originating it, so degrading would leak an internal prefix outside the fabric. Refused. |
+| `confederation identifier` / `peers` | open. Disaggregated T2 / Regional Hub. |
+| `coalesce-time`, `log-neighbor-changes` | open. Dualtor tuning; cosmetic. |
+
+Deliberately *not* counted as gaps: `no bgp default ipv4-unicast` and
+`no bgp ebgp-requires-policy` turn off FRR behaviours zebra-rs does not have.
+Porting them as no-ops would imply a knob exists.
+
+### 2.5 Phase 4 template families
 
 | Family | State |
 |---|---|
