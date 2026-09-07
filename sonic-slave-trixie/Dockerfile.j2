@@ -494,19 +494,6 @@ RUN apt-get update && apt-get install -y eatmydata && eatmydata apt-get install 
         libverto-dev \
         systemtap-sdt-dev \
         xvfb \
-# For grub2
-        help2man \
-        xfonts-unifont \
-        libdevmapper-dev \
-        xfonts-unifont \
-        libsdl1.2-dev \
-        xorriso \
-        parted \
-        mtools \
-        wamerican \
-        libefiboot-dev \
-        libefivar-dev \
-        dosfstools \
 # For nvidia-bluefield sdk compilation
         cython3 \
         pandoc \
@@ -582,8 +569,13 @@ RUN wget -O golang-go.deb '{{ BUILD_PUBLIC_URL }}/fips/trixie/{{ FIPS_VERSION }}
  && ln -sf /usr/lib/go-{{ FIPS_GOLANG_MAIN_VERSION }} /usr/local/go \
  && rm golang-go.deb golang-src.deb
 {%- else %}
+{%- if CONFIGURED_ARCH == "armhf" %}
 RUN eatmydata apt-get install -y golang-go \
+ && ln -sf /usr/lib/go-1.24 /usr/local/go
+{%- else %}
+RUN eatmydata apt-get install -y -t trixie-backports golang-go \
  && ln -sf /usr/lib/go-{{ FIPS_GOLANG_MAIN_VERSION }} /usr/local/go
+{%- endif %}
 {%- endif %}
 
 # For building sonic-utilities

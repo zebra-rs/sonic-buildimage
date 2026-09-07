@@ -165,7 +165,12 @@ list :
 ###############################################################################
 
 include $(RULES_PATH)/config
+-include $(RULES_PATH)/config.organization
 -include $(RULES_PATH)/config.user
+
+ifneq ($(strip $(SONIC_EXTRA_EXPORT_VARS)),)
+export $(SONIC_EXTRA_EXPORT_VARS)
+endif
 
 
 ###############################################################################
@@ -367,6 +372,9 @@ MAKEFLAGS += -j $(SONIC_BUILD_JOBS)
 export SONIC_CONFIG_MAKE_JOBS
 
 # When SONIC_CONFIG_USE_DOCKER_CACHE is enabled, allow Docker layer caching
+DOCKER_BUILD ?= docker build
+DOCKER_BUILD_OPTS ?=
+
 ifneq ($(strip $(SONIC_CONFIG_USE_DOCKER_CACHE)),y)
 DOCKER_NO_CACHE_FLAG = --no-cache
 endif
@@ -434,6 +442,7 @@ export FRR_USER_UID
 export FRR_USER_GID
 export INCLUDE_FIPS
 export ENABLE_FIPS
+export ENABLE_DIALOUT
 
 ###############################################################################
 ## Build Options
@@ -517,6 +526,7 @@ $(info "INCLUDE_DASH_HA"                 : "$(INCLUDE_DASH_HA)")
 $(info "INCLUDE_ROUTER_ADVERTISER"       : "$(INCLUDE_ROUTER_ADVERTISER)")
 $(info "INCLUDE_SNMP"                    : "$(INCLUDE_SNMP)")
 $(info "INCLUDE_LLDP"                    : "$(INCLUDE_LLDP)")
+$(info "INCLUDE_REDFISH"                 : "$(INCLUDE_REDFISH)")
 $(info "INCLUDE_BOOTCHART                : "$(INCLUDE_BOOTCHART)")
 $(info "ENABLE_BOOTCHART                 : "$(ENABLE_BOOTCHART)")
 $(info "INCLUDE_FIPS"                    : "$(INCLUDE_FIPS)")
@@ -736,7 +746,7 @@ SONIC_TARGET_LIST += $(addprefix $(DEBS_PATH)/, $(SONIC_COPY_DEBS))
 #     SOME_NEW_FILE = some_new_file
 #     $(SOME_NEW_FILE)_PATH = path/to/some_new_file
 #     SONIC_COPY_FILES += $(SOME_NEW_FILE)
-$(addprefix $(FILES_PATH)/, $(SONIC_COPY_FILES)) : $(FILES_PATH)/% : .platform
+$(addprefix $(FILES_PATH)/, $(SONIC_COPY_FILES)) : $(FILES_PATH)/% : $$($$*_PATH)/$$* .platform
 	$(HEADER)
 	cp $($*_PATH)/$* $(FILES_PATH)/ $(LOG) || exit 1
 	$(FOOTER)
@@ -1255,7 +1265,7 @@ $(addprefix $(TARGET_PATH)/, $(SONIC_SIMPLE_DOCKER_IMAGES)) : $(TARGET_PATH)/%.g
 	ENABLE_SBOM=$(ENABLE_SBOM) \
 	scripts/prepare_docker_buildinfo.sh $* $($*.gz_PATH)/Dockerfile $(CONFIGURED_ARCH) $(TARGET_DOCKERFILE)/Dockerfile.buildinfo $(LOG)
 	docker info $(LOG)
-	docker build $(DOCKER_NO_CACHE_FLAG) \
+	$(DOCKER_BUILD) $(DOCKER_NO_CACHE_FLAG) $(DOCKER_BUILD_OPTS) \
 		--build-arg http_proxy=$(HTTP_PROXY) \
 		--build-arg https_proxy=$(HTTPS_PROXY) \
 		--build-arg no_proxy=$(NO_PROXY) \
@@ -1431,7 +1441,7 @@ $(addprefix $(TARGET_PATH)/, $(DOCKER_IMAGES)) : $(TARGET_PATH)/%.gz : .platform
 		ENABLE_SBOM=$(ENABLE_SBOM) \
 		scripts/prepare_docker_buildinfo.sh $* $($*.gz_PATH)/Dockerfile $(CONFIGURED_ARCH) $(LOG)
 		docker info $(LOG)
-		docker build $(DOCKER_NO_CACHE_FLAG) \
+		$(DOCKER_BUILD) $(DOCKER_NO_CACHE_FLAG) $(DOCKER_BUILD_OPTS) \
 			--build-arg http_proxy=$(HTTP_PROXY) \
 			--build-arg https_proxy=$(HTTPS_PROXY) \
 			--build-arg no_proxy=$(NO_PROXY) \
@@ -1504,8 +1514,8 @@ $(addprefix $(TARGET_PATH)/, $(DOCKER_DBG_IMAGES)) : $(TARGET_PATH)/%-$(DBG_IMAG
 		ENABLE_SBOM=$(ENABLE_SBOM) \
 		scripts/prepare_docker_buildinfo.sh $*-dbg $($*.gz_PATH)/Dockerfile-dbg $(CONFIGURED_ARCH) $(LOG)
 		docker info $(LOG)
-		docker build \
-			$(DOCKER_NO_CACHE_FLAG) \
+		$(DOCKER_BUILD) \
+			$(DOCKER_NO_CACHE_FLAG) $(DOCKER_BUILD_OPTS) \
 			--build-arg http_proxy=$(HTTP_PROXY) \
 			--build-arg https_proxy=$(HTTPS_PROXY) \
 			--build-arg no_proxy=$(NO_PROXY) \
@@ -1568,7 +1578,8 @@ $(DOCKER_LOAD_TARGETS) : $(TARGET_PATH)/%.gz-load : .platform docker-start $$(TA
 $(addprefix $(TARGET_PATH)/, $(SONIC_RFS_TARGETS)) : $(TARGET_PATH)/% : \
         .platform \
         build_debian.sh \
-        $(addprefix $(IMAGE_DISTRO_DEBS_PATH)/,$(INITRAMFS_TOOLS) $(LINUX_KERNEL) $(GRUB2_COMMON)) \
+        $(SONIC_DEBIAN_EXTENSION_DEPENDS) \
+        $(addprefix $(IMAGE_DISTRO_DEBS_PATH)/,$(INITRAMFS_TOOLS) $(LINUX_KERNEL)) \
         $$(addprefix $(TARGET_PATH)/,$$($$*_DEPENDENT_RFS)) \
         $(call dpkg_depend,$(TARGET_PATH)/%.dep)
 	$(HEADER)
@@ -1627,6 +1638,7 @@ $(addprefix $(TARGET_PATH)/, $(SONIC_INSTALLERS)) : $(TARGET_PATH)/% : \
         build_debian.sh \
         files/build_templates/sonic_debian_extension.j2 \
         files/build_templates/docker_image_ctl.j2 \
+        $(SONIC_DEBIAN_EXTENSION_DEPENDS) \
         scripts/dbg_files.sh \
         scripts/build_sbom.sh \
         scripts/install_sbom_tool.sh \
@@ -1663,12 +1675,12 @@ $(addprefix $(TARGET_PATH)/, $(SONIC_INSTALLERS)) : $(TARGET_PATH)/% : \
                 $(BASH_TACPLUS) \
                 $(AUDISP_TACPLUS) \
                 $(SYSLOG_COUNTER) \
-                $(SEDUTIL) \
-                $(GRUB2_COMMON)) \
+                $(SEDUTIL)) \
         $$(addprefix $(TARGET_PATH)/,$$($$*_DOCKERS)) \
         $$(addprefix $(TARGET_PATH)/,$$(SONIC_PACKAGES_LOCAL)) \
         $$(addprefix $(FILES_PATH)/,$$($$*_FILES)) \
         $(if $(findstring y,$(ENABLE_ZTP)),$(addprefix $(IMAGE_DISTRO_DEBS_PATH)/,$(SONIC_ZTP))) \
+        $(addprefix $(IMAGE_DISTRO_DEBS_PATH)/,$(SONIC_INSTALLER_EXTRA_DEBS)) \
         $(if $(findstring y,$(INCLUDE_FIPS)),$(addprefix $(IMAGE_DISTRO_DEBS_PATH)/,$(SYMCRYPT_OPENSSL))) \
         $(addprefix $(PYTHON_WHEELS_PATH)/,$(SONIC_UTILITIES_PY3)) \
         $(addprefix $(PYTHON_WHEELS_PATH)/,$(SONIC_PY_COMMON_PY2)) \
@@ -1725,6 +1737,7 @@ $(addprefix $(TARGET_PATH)/, $(SONIC_INSTALLERS)) : $(TARGET_PATH)/% : \
 	export include_p4rt="$(INCLUDE_P4RT)"
 	export include_snmp="$(INCLUDE_SNMP)"
 	export include_lldp="$(INCLUDE_LLDP)"
+	export include_redfish="$(INCLUDE_REDFISH)"
 	export include_sflow="$(INCLUDE_SFLOW)"
 	export enable_auto_tech_support="$(ENABLE_AUTO_TECH_SUPPORT)"
 	export enable_asan="$(ENABLE_ASAN)"
@@ -1740,6 +1753,7 @@ $(addprefix $(TARGET_PATH)/, $(SONIC_INSTALLERS)) : $(TARGET_PATH)/% : \
 	export default_buffer_model="$(SONIC_BUFFER_MODEL)"
 	export include_kubernetes="$(INCLUDE_KUBERNETES)"
 	export include_kubernetes_master="$(INCLUDE_KUBERNETES_MASTER)"
+	$(foreach kv,$(SONIC_INSTALLER_EXTRA_EXPORTS),export $(kv);)
 	export kube_docker_proxy="$(KUBE_DOCKER_PROXY)"
 	export enable_pfcwd_on_start="$(ENABLE_PFCWD_ON_START)"
 	export installer_debs="$(addprefix $(IMAGE_DISTRO_DEBS_PATH)/,$($*_INSTALLS) $(FIPS_BASEIMAGE_INSTALLERS) $(SOCAT))"
@@ -1886,6 +1900,7 @@ $(addprefix $(TARGET_PATH)/, $(SONIC_INSTALLERS)) : $(TARGET_PATH)/% : \
 		BUILD_PACKAGES_URL=$(BUILD_PACKAGES_URL) \
 		DBGOPT='$(DBGOPT)' \
 		SONIC_VERSION_CACHE=$(SONIC_VERSION_CACHE) \
+		$(SONIC_DEBIAN_EXTRA_ENV) \
 		MULTIARCH_QEMU_ENVIRON=$(MULTIARCH_QEMU_ENVIRON) \
 		CROSS_BUILD_ENVIRON=$(CROSS_BUILD_ENVIRON) \
 		BUILD_REDUCE_IMAGE_SIZE=$(BUILD_REDUCE_IMAGE_SIZE) \
@@ -1920,6 +1935,11 @@ $(addprefix $(TARGET_PATH)/, $(SONIC_INSTALLERS)) : $(TARGET_PATH)/% : \
 		CA_CERT="$(CA_CERT)" \
 		TARGET_PATH="$(TARGET_PATH)" \
 			./build_image.sh $(LOG)
+
+		printf '%s\n' $${installer_images} | \
+			awk -F'|' -v machine="$(dep_machine)" \
+				'$$3 == "" || $$3 == machine { image = $$4; sub(/:[^:]*$$/, "", image); print image }' \
+				> "$(TARGET_PATH)/$(subst $($*_MACHINE),$(dep_machine),$*).dockers"
 
 		# SBOM emit runs AFTER build_image.sh so the artifact (.bin /
 		# .swi / .img.gz) already exists on disk: sbom_emit_provenance.py
@@ -1961,6 +1981,11 @@ $(addprefix $(TARGET_PATH)/, $(SONIC_INSTALLERS)) : $(TARGET_PATH)/% : \
 
 	$(if $($*_DOCKERS),
 		rm sonic_debian_extension.sh,
+	)
+
+	# Provide a hook that modules may use for post-build activities
+	$(if $($*_POST_BUILD_HOOK), \
+		$($*_POST_BUILD_HOOK) $(LOG) || echo WARNING: Hook for module $* failed - continuing ... \
 	)
 
 	chmod a+x $@
