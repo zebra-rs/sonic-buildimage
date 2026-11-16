@@ -47,6 +47,26 @@ stderr_syslog=true
 dependent_startup=true
 dependent_startup_wait_for=rsyslogd:running
 
+{# bgpcfgd is the same daemon the FRR container runs. It turns CONFIG_DB
+   (BGP_NEIGHBOR, BGP_PEER_RANGE, ...) into configuration at runtime; the
+   startup render above only carries the BGP instance, so without it the
+   daemon has no neighbors. SONIC_ROUTING_STACK selects its zebra-rs
+   backend and dialect (bgpcfgd/dialect.py). It waits for fpmsyncd so the
+   first sessions come up with the FPM tee already connected. #}
+[program:bgpcfgd]
+command=/usr/local/bin/bgpcfgd
+environment=SONIC_ROUTING_STACK="zebra-rs"
+priority=6
+autostart=false
+autorestart=false
+startsecs=0
+stdout_logfile=NONE
+stdout_syslog=true
+stderr_logfile=NONE
+stderr_syslog=true
+dependent_startup=true
+dependent_startup_wait_for=fpmsyncd:running
+
 {# fpmsyncd is unchanged from the FRR container — it is the whole point of
    the FPM approach that everything below it stays as it is. It listens on
    TCP 2620; zebra-rs dials out to it. #}

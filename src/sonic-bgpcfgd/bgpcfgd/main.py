@@ -35,11 +35,72 @@ from .runner import Runner, signal_handler
 from .template import TemplateFabric
 from .utils import read_constants
 from .frr import FRR
+from .zebra_rs import ZebraRs
+from .dialect import is_zebra_rs
 from .vars import g_debug
+
+
+def do_work_zebra_rs():
+    """
+    Main function when the routing stack is zebra-rs.
+
+    Only the managers whose templates have been ported to the zebra-rs
+    dialect are started. The rest emit FRR syntax from Python or from
+    templates that have no zebra-rs counterpart yet; starting them would
+    push text the daemon rejects, and since a zebra-rs commit is atomic a
+    single rejected line discards everything else in the same batch.
+    Leaving a manager out means its CONFIG_DB table is ignored, which is
+    logged here once rather than failing on every event.
+    """
+    backend = ZebraRs()
+    backend.wait_for_daemons(seconds=20)
+    common_objs = {
+        'directory': Directory(),
+        'cfg_mgr':   ConfigMgr(backend),
+        'tf':        TemplateFabric(),
+        'constants': read_constants(),
+        'state_db_conn': swsscommon.DBConnector("STATE_DB", 0)
+    }
+    # The peer managers wait on the device-global state that
+    # DeviceGlobalCfgMgr publishes. That manager is not ported, so publish
+    # its defaults (no TSA, not isolated) here; otherwise no peer would
+    # ever be configured. A box with TSA enabled in CONFIG_DB is therefore
+    # NOT isolated under zebra-rs yet — see the warning below.
+    for key, value in (("tsa_enabled", DeviceGlobalCfgMgr.TSA_DEFAULTS),
+                       ("idf_isolation_state", DeviceGlobalCfgMgr.IDF_DEFAULTS)):
+        common_objs['directory'].put("CONFIG_DB", swsscommon.CFG_BGP_DEVICE_GLOBAL_TABLE_NAME, key, value)
+    managers = [
+        # Config DB managers
+        BGPDataBaseMgr(common_objs, "CONFIG_DB", swsscommon.CFG_DEVICE_METADATA_TABLE_NAME),
+        BGPDataBaseMgr(common_objs, "CONFIG_DB", swsscommon.CFG_DEVICE_NEIGHBOR_METADATA_TABLE_NAME),
+        # Interface managers
+        InterfaceMgr(common_objs, "CONFIG_DB", swsscommon.CFG_INTF_TABLE_NAME),
+        InterfaceMgr(common_objs, "CONFIG_DB", swsscommon.CFG_LOOPBACK_INTERFACE_TABLE_NAME),
+        InterfaceMgr(common_objs, "CONFIG_DB", swsscommon.CFG_VLAN_INTF_TABLE_NAME),
+        InterfaceMgr(common_objs, "CONFIG_DB", swsscommon.CFG_LAG_INTF_TABLE_NAME),
+        InterfaceMgr(common_objs, "CONFIG_DB", swsscommon.CFG_VOQ_INBAND_INTERFACE_TABLE_NAME),
+        InterfaceMgr(common_objs, "CONFIG_DB", swsscommon.CFG_VLAN_SUB_INTF_TABLE_NAME),
+        # Peer Managers — the template families ported so far
+        BGPPeerMgrBase(common_objs, "CONFIG_DB", swsscommon.CFG_BGP_NEIGHBOR_TABLE_NAME, "general", True),
+        BGPPeerMgrBase(common_objs, "CONFIG_DB", "BGP_PEER_RANGE", "dynamic", False),
+        BGPPeerMgrBase(common_objs, "CONFIG_DB", "BGP_SENTINELS", "sentinels", False),
+    ]
+    log_warn("zebra-rs: not ported yet, their tables are ignored: "
+             "BGP_INTERNAL_NEIGHBOR, BGP_MONITORS, BGP_VOQ_CHASSIS_NEIGHBOR, "
+             "BGP_ALLOWED_PREFIXES, BGP_BBR, STATIC_ROUTE, ADVERTISE_NETWORK, BGP_PROFILE, "
+             "BGP_DEVICE_GLOBAL (TSA, WCMP, IDF isolation), BGP_AGGREGATE_ADDRESS, SRV6, PREFIX_LIST, "
+             "software BFD, set-src")
+
+    runner = Runner(common_objs['cfg_mgr'])
+    for mgr in managers:
+        runner.add_manager(mgr)
+    runner.run()
 
 
 def do_work():
     """ Main function """
+    if is_zebra_rs():
+        return do_work_zebra_rs()
     st_rt_timer = StaticRouteTimer()
     thr = threading.Thread(target = st_rt_timer.run)
     thr.start()

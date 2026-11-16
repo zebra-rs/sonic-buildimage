@@ -9,6 +9,8 @@ from .log import log_warn, log_err, log_info, log_debug, log_crit
 from .manager import Manager
 from .template import TemplateFabric
 from .utils import run_command
+from .dialect import is_zebra_rs
+from .zebra_rs import ZebraRs
 from .managers_device_global import DeviceGlobalCfgMgr
 
 
@@ -25,7 +27,12 @@ class BGPPeerGroupMgr(object):
         tf = common_objs['tf']
         self.policy_template = tf.from_file(base_template + "policies.conf.j2")
         self.peergroup_template = tf.from_file(base_template + "peer-group.conf.j2")
-        self.device_global_cfgmgr = DeviceGlobalCfgMgr(common_objs, "CONFIG_DB", swsscommon.CFG_BGP_DEVICE_GLOBAL_TABLE_NAME)
+        # TSA and IDF isolation are applied as FRR route-map text generated
+        # by DeviceGlobalCfgMgr; that manager has no zebra-rs dialect yet,
+        # so it is not constructed there and the peer-group goes in without
+        # those route-maps.
+        self.zebra_rs = is_zebra_rs()
+        self.device_global_cfgmgr = None if self.zebra_rs else DeviceGlobalCfgMgr(common_objs, "CONFIG_DB", swsscommon.CFG_BGP_DEVICE_GLOBAL_TABLE_NAME)
 
     def update(self, name, **kwargs):
         """
@@ -57,6 +64,21 @@ class BGPPeerGroupMgr(object):
         :param name: name of the peer. Used for logging only
         :param kwargs: dictionary with parameters for rendering
         """
+        if self.zebra_rs:
+            # zebra-rs `set` lines carry their full path, so there is no
+            # `router bgp` block to open, and a non-default VRF is a
+            # different path rather than a different block header.
+            if kwargs['vrf'] != 'default':
+                log_err("Peer-group for peer '%s': vrf '%s' is not supported with zebra-rs yet" % (name, kwargs['vrf']))
+                return False
+            try:
+                pg = self.peergroup_template.render(**kwargs)
+            except jinja2.TemplateError as e:
+                log_err("Can't render peer-group template: '%s': %s" % (name, str(e)))
+                return False
+            self.update_entity(pg, "Peer-group for peer '%s'" % name)
+            return True
+
         try:
             pg = self.peergroup_template.render(**kwargs)
             tsa_rm = self.device_global_cfgmgr.check_state_and_get_tsa_routemaps(pg)
@@ -101,13 +123,28 @@ class BGPPeerMgrBase(Manager):
         self.post_dependencies_init_complete = False
 
         base_template = "bgpd/templates/" + self.constants["bgp"]["peers"][peer_type]["template_dir"] + "/"
-        self.templates = {
-            "add":         self.fabric.from_file(base_template + "instance.conf.j2"),
-            "delete":      self.fabric.from_string('no neighbor {{ neighbor_addr }}'),
-            "shutdown":    self.fabric.from_string('neighbor {{ neighbor_addr }} shutdown'),
-            "no shutdown": self.fabric.from_string('no neighbor {{ neighbor_addr }} shutdown'),
-            "no listen range": self.fabric.from_string('no bgp listen range {{ ip_range }} peer-group {{peer_group}}'),
-        }
+        self.zebra_rs = is_zebra_rs()
+        if self.zebra_rs:
+            self.templates = {
+                "add":         self.fabric.from_file(base_template + "instance.conf.j2"),
+                # A listen-range family is keyed by its group's name, and in
+                # zebra-rs a neighbor-group is not a neighbor: FRR's one
+                # `no neighbor NAME` covers both, this has to say which.
+                "delete":      self.fabric.from_string(
+                    'delete router bgp neighbor-group {{ neighbor_addr }}' if peer_type in ('dynamic', 'sentinels')
+                    else 'delete router bgp neighbor {{ neighbor_addr }}'),
+                "shutdown":    self.fabric.from_string('set router bgp neighbor {{ neighbor_addr }} enabled false'),
+                "no shutdown": self.fabric.from_string('set router bgp neighbor {{ neighbor_addr }} enabled true'),
+                "no listen range": self.fabric.from_string('delete router bgp dynamic-neighbor listen-range {{ ip_range }} neighbor-group {{peer_group}}'),
+            }
+        else:
+            self.templates = {
+                "add":         self.fabric.from_file(base_template + "instance.conf.j2"),
+                "delete":      self.fabric.from_string('no neighbor {{ neighbor_addr }}'),
+                "shutdown":    self.fabric.from_string('neighbor {{ neighbor_addr }} shutdown'),
+                "no shutdown": self.fabric.from_string('no neighbor {{ neighbor_addr }} shutdown'),
+                "no listen range": self.fabric.from_string('no bgp listen range {{ ip_range }} peer-group {{peer_group}}'),
+            }
 
         if (os.path.exists(self.fabric.env.loader.searchpath[0] + "/" + base_template + "update.conf.j2")):
             self.templates["update"] = self.fabric.from_file(base_template + "update.conf.j2")
@@ -498,6 +535,15 @@ class BGPPeerMgrBase(Manager):
         :param vrf: vrf where the commands should be applied
         :return: True if no errors, False if there are errors
         """
+        if self.zebra_rs:
+            # `set`/`delete` lines are absolute; nothing to wrap them in.
+            # suppress-fib-pending is an instance leaf set once by the
+            # startup template, not re-asserted on every peer change.
+            if vrf != 'default':
+                log_err("Peer in vrf '%s' is not supported with zebra-rs yet" % vrf)
+                return False
+            self.cfg_mgr.push(cmd)
+            return True
         bgp_asn = self.directory.get_slot("CONFIG_DB", swsscommon.CFG_DEVICE_METADATA_TABLE_NAME)["localhost"]["bgp_asn"]
         enable_bgp_suppress_fib_pending_cmd = 'bgp suppress-fib-pending'
         if vrf == 'default':
@@ -585,6 +631,8 @@ class BGPPeerMgrBase(Manager):
         Load peers from FRR.
         :return: set of peers, which are already installed in FRR
         """
+        if is_zebra_rs():
+            return BGPPeerMgrBase.load_peers_zebra_rs()
         command = ["vtysh", "-H", "/dev/null", "-c", "show bgp vrfs json"]
         ret_code, out, err = run_command(command)
         if ret_code == 0:
@@ -605,4 +653,25 @@ class BGPPeerMgrBase(Manager):
                 log_crit("Can't read vrf '%s' neighbors: %s" % (vrf, str(err)))
                 raise Exception("Can't read vrf '%s' neighbors: %s" % (vrf, str(err)))
 
+        return peers
+
+    @staticmethod
+    def load_peers_zebra_rs():
+        """
+        Load peers from zebra-rs.
+
+        Read from the running configuration rather than from a `show bgp`
+        JSON view: the question is "what has been configured", which is
+        what the running config is, and it does not depend on FRR's JSON
+        schema. Only the default VRF is handled, matching what the
+        zebra-rs templates support.
+        :return: set of (vrf, neighbor) already configured in zebra-rs
+        """
+        peers = set()
+        for line in ZebraRs.get_config().splitlines():
+            words = line.split()
+            if words[:1] == ["set"]:
+                words = words[1:]
+            if len(words) >= 4 and words[:3] == ["router", "bgp", "neighbor"]:
+                peers.add(("default", words[3]))
         return peers

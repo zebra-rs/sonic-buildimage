@@ -76,7 +76,10 @@ def test_write():
     written = {}
 
     def fake(cmd, **kwargs):
-        # cmd is ["vtyctl", "apply", "-f", <tmpfile>]
+        # write() first reads the running config to drop lines the daemon
+        # already has, then applies: ["vtyctl", "apply", "-f", <tmpfile>]
+        if cmd[1] == "show":
+            return (0, "", "")
         with open(cmd[3]) as fp:
             written["text"] = fp.read()
         written["cmd"] = cmd
@@ -126,3 +129,71 @@ def test_restart_peer_groups_reports_unsupported():
     session because one group's policy changed.
     """
     assert not bgpcfgd.zebra_rs.ZebraRs.restart_peer_groups(["PEER_V4"])
+
+
+def _fake_daemon(running, applied):
+    """ run_command stand-in: answers `show running-config formal` with
+    `running` and records the text of each `apply -f <file>` """
+    def fake(cmd, **kwargs):
+        if cmd[1] == "show":
+            return 0, running, ""
+        with open(cmd[3]) as fp:
+            applied.append(fp.read())
+        return 0, "", ""
+    return fake
+
+
+def test_write_skips_what_the_daemon_already_has():
+    # A leaf-list `set` appends in zebra-rs, so re-pushing a peer-group's
+    # policy for every peer that uses it would store each community once
+    # per peer. Only the genuinely new line may reach the daemon.
+    applied = []
+    bgpcfgd.zebra_rs.run_command = _fake_daemon(
+        "set community-set C members 5060:12345\nset router bgp neighbor-group PEER_V4\n",
+        applied,
+    )
+    assert bgpcfgd.zebra_rs.ZebraRs.write(
+        "set community-set C members 5060:12345\n"
+        "set router bgp neighbor-group PEER_V4\n"
+        "set router bgp neighbor 10.0.0.1 remote-as 65200\n"
+    )
+    assert applied == ["set router bgp neighbor 10.0.0.1 remote-as 65200\n"]
+
+
+def test_write_drops_repeats_within_a_batch():
+    applied = []
+    bgpcfgd.zebra_rs.run_command = _fake_daemon("", applied)
+    assert bgpcfgd.zebra_rs.ZebraRs.write(
+        "set community-set C members no-export\n" * 3
+        + "set router bgp neighbor 10.0.0.1 remote-as 65200\n"
+    )
+    assert applied == [
+        "set community-set C members no-export\n"
+        "set router bgp neighbor 10.0.0.1 remote-as 65200\n"
+    ]
+
+
+def test_write_with_nothing_new_does_not_call_apply():
+    applied = []
+    bgpcfgd.zebra_rs.run_command = _fake_daemon("set router bgp neighbor-group PEER_V4\n", applied)
+    assert bgpcfgd.zebra_rs.ZebraRs.write("set router bgp neighbor-group PEER_V4\n")
+    assert applied == []
+
+
+def test_write_passes_a_batch_with_a_delete_through_untouched():
+    # A `set` after a `delete` may be re-creating what the delete removes;
+    # the running config read before the batch cannot tell.
+    applied = []
+    bgpcfgd.zebra_rs.run_command = _fake_daemon("set router bgp neighbor 10.0.0.1 remote-as 65200\n", applied)
+    text = (
+        "delete router bgp neighbor 10.0.0.1\n"
+        "set router bgp neighbor 10.0.0.1 remote-as 65200\n"
+    )
+    assert bgpcfgd.zebra_rs.ZebraRs.write(text)
+    assert applied == [text]
+
+
+def test_restart_peer_groups_with_nothing_to_restart_succeeds():
+    # ConfigMgr.commit() calls this on every commit, almost always with an
+    # empty list; that must not read as a failed commit.
+    assert bgpcfgd.zebra_rs.ZebraRs.restart_peer_groups([])

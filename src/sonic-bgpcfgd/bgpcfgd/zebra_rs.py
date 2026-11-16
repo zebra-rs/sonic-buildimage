@@ -75,10 +75,9 @@ class ZebraRs(object):
         """
         Read the running configuration as flat `set`-style statements.
 
-        Returned lines carry no `set ` prefix — that is the format
-        `show running-config formal` emits — while `write()` expects one.
-        Callers comparing the two must account for that rather than
-        assuming they are directly comparable.
+        Each line is a complete `set <path> [value]` statement, the same
+        shape `write()` takes, so the two are directly comparable line by
+        line.
         """
         ret_code, out, err = run_command([VTYCTL, "show", "show running-config formal"])
         if ret_code != 0:
@@ -96,6 +95,9 @@ class ZebraRs(object):
         :param config_text: `set` / `delete` lines, one per line
         :return: True on success
         """
+        config_text = ZebraRs.drop_redundant_sets(config_text)
+        if config_text is None:
+            return True
         fd, tmp_filename = tempfile.mkstemp(dir="/tmp")
         os.close(fd)
         with open(tmp_filename, "w") as fp:
@@ -127,6 +129,39 @@ class ZebraRs(object):
         return ret_code == 0 and not rejected
 
     @staticmethod
+    def drop_redundant_sets(config_text):
+        """
+        Remove `set` lines the daemon already has, and repeats within the
+        batch.
+
+        bgpcfgd re-pushes a peer's whole policy and peer-group text for
+        every peer that uses them. FRR absorbs that: re-entering a line is
+        a no-op. zebra-rs does not for a leaf-list — `set community-set X
+        members A` appends, so the same member is stored once per push
+        (32 neighbors on a stock T1 left 32 copies of each member in the
+        running config). Filtering against the running config makes a
+        push idempotent for every statement type, and keeps the commit
+        small.
+
+        A batch containing a `delete` is passed through untouched: a
+        later `set` there may be re-creating what the delete removes, and
+        the running config read here predates both.
+        :return: the text to apply, or None if nothing is left to do
+        """
+        lines = [line.strip() for line in config_text.splitlines() if line.strip()]
+        if any(line.startswith("delete ") for line in lines):
+            return "\n".join(lines)
+        have = set(line.strip() for line in ZebraRs.get_config().splitlines())
+        seen = set()
+        out = []
+        for line in lines:
+            if line in have or line in seen:
+                continue
+            seen.add(line)
+            out.append(line)
+        return "\n".join(out) if out else None
+
+    @staticmethod
     def restart_peer_groups(peer_groups):
         """
         Soft-clear peer-groups.
@@ -144,6 +179,10 @@ class ZebraRs(object):
         detail. Returning False lets the caller see the operation did not
         happen — BBR (managers_bbr) is the consumer to check first.
         """
+        if not peer_groups:
+            # ConfigMgr.commit() calls this on every commit; nothing was
+            # asked for, so nothing failed.
+            return True
         log_err(
             "ZebraRs::restart_peer_groups(): peer-group soft-clear is not supported yet "
             "(zebra-rs clears by neighbor, not by peer-group); groups=%s"
