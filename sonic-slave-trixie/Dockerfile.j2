@@ -833,6 +833,35 @@ RUN CARGO_HOME=$RUST_ROOT $RUST_ROOT/bin/cargo install --locked rust-audit-info@
 COPY buildinfo/cargo-wrapper /usr/local/bin/cargo
 RUN chmod 0755 /usr/local/bin/cargo
 
+# Second, pinned Rust toolchain for zebra-rs (src/sonic-zebra-rs).
+# zebra-rs and its dependency graph (tonic, time, sha2, ...) need Rust
+# 1.88 or newer; the default above is 1.86.0 and the other Rust packages
+# in the tree are built and tested against that. Installing a second
+# toolchain side by side lets an off-by-default package use a newer
+# compiler without forcing every other Rust package through an upgrade.
+# src/sonic-zebra-rs/Makefile selects it with RUSTUP_TOOLCHAIN. Keep in
+# sync with ZEBRA_RS_RUST_VERSION in rules/zebra-rs.mk. Placed after the
+# default toolchain's layers so adding or bumping it does not invalidate
+# them.
+#
+# It needs its own cargo-auditable too. zebra-rs is edition 2024, and the
+# 0.6.4 pinned above panics on it while parsing `cargo metadata`
+# ("unknown variant `2024`"), so the /usr/local/bin/cargo wrapper cannot
+# build it. A newer cargo-auditable is installed under its own root
+# rather than replacing the pinned one, for the same reason as the
+# toolchain; the Makefile invokes it by path. The binary it produces
+# carries the same .dep-v0 section, which rust-audit-info reads.
+ARG ZEBRA_RS_RUST_VERSION=1.97.0
+ARG ZEBRA_RS_CARGO_ROOT=/usr/.cargo-zebra-rs
+RUN CARGO_HOME=$RUST_ROOT $RUST_ROOT/bin/rustup toolchain install $ZEBRA_RS_RUST_VERSION --profile minimal
+RUN CARGO_HOME=$RUST_ROOT RUSTUP_TOOLCHAIN=$ZEBRA_RS_RUST_VERSION $RUST_ROOT/bin/cargo install --locked cargo-auditable@0.7.7 --root $ZEBRA_RS_CARGO_ROOT
+{% if CROSS_BUILD_ENVIRON == "y" and CONFIGURED_ARCH == "armhf" %}
+RUN CARGO_HOME=$RUST_ROOT $RUST_ROOT/bin/rustup target add --toolchain $ZEBRA_RS_RUST_VERSION armv7-unknown-linux-gnueabihf
+{% endif -%}
+{% if CROSS_BUILD_ENVIRON == "y" and CONFIGURED_ARCH == "arm64" %}
+RUN CARGO_HOME=$RUST_ROOT $RUST_ROOT/bin/rustup target add --toolchain $ZEBRA_RS_RUST_VERSION aarch64-unknown-linux-gnu
+{% endif -%}
+
 {# Include vendor-defined rules for slave container if it exists.  Contained in ../files #}
 {% with DEBIAN_VERSION='trixie' %}
 {% include 'files/sonic-slave-Dockerfile.vendor.j2' ignore missing %}

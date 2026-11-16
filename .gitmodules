@@ -161,4 +161,4 @@
 [submodule "src/sonic-zebra-rs/zebra-rs"]
 	path = src/sonic-zebra-rs/zebra-rs
 	url = https://github.com/zebra-rs/zebra-rs.git
-	branch = fpm-tap
+	branch = main

@@ -24,7 +24,19 @@ $(addprefix $(DEST)/, $(MAIN_TARGET)): $(DEST)/% :
 
 	pushd zebra-rs
 
-	cargo build --release --locked --bin zebra-rs --bin vtyctl --bin vtyhelper
+	# Two things differ from a plain `cargo build`, both because zebra-rs
+	# is newer than the slave's default Rust (see the zebra-rs block in
+	# sonic-slave-trixie/Dockerfile.j2):
+	#  - RUSTUP_TOOLCHAIN selects the second, pinned toolchain.
+	#  - the slave's /usr/local/bin/cargo wrapper routes `build` through
+	#    cargo-auditable 0.6.4, which cannot parse an edition-2024
+	#    manifest. The newer cargo-auditable is called by path instead;
+	#    CARGO_AUDITABLE_WRAPPED makes the wrapper pass through when
+	#    cargo-auditable re-invokes `cargo`. The result still carries the
+	#    .dep-v0 section the SBOM tooling reads.
+	RUSTUP_TOOLCHAIN=$(ZEBRA_RS_RUST_VERSION) CARGO_AUDITABLE_WRAPPED=1 \
+	    /usr/.cargo-zebra-rs/bin/cargo-auditable auditable build --release --locked \
+	    --bin zebra-rs --bin vtyctl --bin vtyhelper
 
 	popd
 
