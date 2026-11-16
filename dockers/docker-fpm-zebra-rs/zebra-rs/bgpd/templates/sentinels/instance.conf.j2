@@ -1,0 +1,54 @@
+{#- BGP_SENTINELS dynamic peer-group, as zebra-rs `set` statements.
+    Port of dockers/docker-fpm-frr/frr/bgpd/templates/sentinels/instance.conf.j2.
+
+    Like the BGP_SPEAKER family this configures a *listen range*, so every
+    knob has to live on the neighbor-group: members are materialized on
+    accept and there is no per-neighbor statement to carry anything.
+
+    Mapping beyond the dynamic family:
+
+      neighbor N remote-as <our AS>       -> neighbor-group N remote-as <our AS>
+                                             (iBGP: the sentinel peers from
+                                             inside the AS)
+      neighbor N addpath-tx-all-paths     -> neighbor-group N afi-safi <af>
+                                             add-path send
+      neighbor N maximum-prefix 200       -> neighbor-group N afi-safi <af>
+                                             maximum-prefix limit 200
+      neighbor N route-map X in|out       -> neighbor-group N policy in|out X
+                                             (FRR states it per address
+                                             family with the same two names
+                                             in both; zebra-rs binds it once
+                                             for the peer)
+
+    NOT EQUIVALENT YET — `addpath-tx-all-paths`. `add-path send` says the
+    capability is advertised; it does not say every path is sent, and FRR
+    distinguishes tx-all-paths from tx-bestpath-per-AS. The sentinel wants
+    all paths. Whether zebra-rs sends them has not been measured — it needs
+    a live session with two paths to one prefix and a count of what crosses
+    the wire. Until then this commits, negotiates, and may show the sentinel
+    less than it asked for. (bgp-sonic-gaps.md, "addpath-tx-all-paths".)
+
+    `maximum-prefix`: zebra-rs ends the session with Cease/Maximum Number of
+    Prefixes Reached past the limit, as FRR does. Two differences worth
+    knowing: the peer then stays in Idle until `clear bgp` or a config
+    change (FRR's default too, with no `restart` given), and above
+    `rib-sharding 1` the IPv4 check lags the shards, so slightly more than
+    200 can be accepted before the teardown.
+
+    GAP — `soft-reconfiguration inbound`, as in the general and dynamic
+    families: no config leaf. Dropped, on the same untested assumption. -#}
+set router bgp neighbor-group {{ bgp_session['name'] }}
+set router bgp neighbor-group {{ bgp_session['name'] }} remote-as {{ bgp_asn }}
+{% if bgp_session['src_address'] is defined %}
+set router bgp neighbor-group {{ bgp_session['name'] }} update-source {{ bgp_session['src_address'] | ip }}
+{% endif %}
+set router bgp neighbor-group {{ bgp_session['name'] }} policy in FROM_BGP_SENTINEL
+set router bgp neighbor-group {{ bgp_session['name'] }} policy out TO_BGP_SENTINEL
+{% for ip_range in bgp_session['ip_range'].split(',') %}
+set router bgp dynamic-neighbor listen-range {{ ip_range }} neighbor-group {{ bgp_session['name'] }}
+{% endfor %}
+{% for af in ['ipv4', 'ipv6'] %}
+set router bgp neighbor-group {{ bgp_session['name'] }} afi-safi {{ af }} enabled true
+set router bgp neighbor-group {{ bgp_session['name'] }} afi-safi {{ af }} add-path send
+set router bgp neighbor-group {{ bgp_session['name'] }} afi-safi {{ af }} maximum-prefix limit 200
+{% endfor %}

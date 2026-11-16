@@ -1,0 +1,39 @@
+{#- BGP_SENTINELS routing policy, as zebra-rs `set` statements.
+    Port of dockers/docker-fpm-frr/frr/bgpd/templates/sentinels/policies.conf.j2.
+
+    FRR:
+
+      bgp community-list standard sentinel_community permit <C> no-export
+      route-map FROM_BGP_SENTINEL permit 100
+       match community sentinel_community
+      route-map FROM_BGP_SENTINEL deny 200
+      route-map TO_BGP_SENTINEL permit 100
+
+    The community-list line is the part that does not translate word for
+    word. One FRR standard community-list entry naming two communities
+    matches a route that carries BOTH. A zebra-rs community-set matches a
+    route that carries ANY of its members (CommunitySet::matches), so a
+    two-member set would accept a route tagged `no-export` alone — which is
+    every route a neighbour chose not to export, not just the sentinel's.
+
+    So the conjunction is spelled out: entry 100 matches the sentinel
+    community and `call`s a policy that permits only a route carrying
+    `no-export`. A callee that denies makes the caller deny, so a route has
+    to pass both.
+
+    ASSUMED, NOT MEASURED: that a called policy with no matching entry
+    denies, as a route-map does. If it permitted instead, the `no-export`
+    half of the test would silently stop applying. Entry 20 states the deny
+    explicitly so the result does not rest on that default. -#}
+{% if constants.bgp.sentinel_community is defined %}
+set community-set sentinel_community members {{ constants.bgp.sentinel_community }}
+set community-set sentinel_no_export members no-export
+set policy SENTINEL_REQUIRE_NO_EXPORT entry 10 match community sentinel_no_export
+set policy SENTINEL_REQUIRE_NO_EXPORT entry 10 action permit
+set policy SENTINEL_REQUIRE_NO_EXPORT entry 20 action deny
+set policy FROM_BGP_SENTINEL entry 100 match community sentinel_community
+set policy FROM_BGP_SENTINEL entry 100 call SENTINEL_REQUIRE_NO_EXPORT
+set policy FROM_BGP_SENTINEL entry 100 action permit
+{% endif %}
+set policy FROM_BGP_SENTINEL entry 200 action deny
+set policy TO_BGP_SENTINEL entry 100 action permit

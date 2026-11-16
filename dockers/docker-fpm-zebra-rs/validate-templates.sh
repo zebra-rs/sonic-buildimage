@@ -31,7 +31,7 @@ FIXTURE_ROOT="$root/src/sonic-bgpcfgd/tests/data"
 # Ported families, and per family the templates that have fixtures in
 # bgpcfgd's own test data. Each is rendered from the same inputs the FRR
 # version is tested with.
-FAMILIES="general dynamic"
+FAMILIES="general dynamic sentinels"
 TEMPLATES="instance.conf peer-group.conf policies.conf"
 
 cleanup() {
