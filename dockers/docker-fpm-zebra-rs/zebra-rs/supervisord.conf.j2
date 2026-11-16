@@ -34,8 +34,15 @@ dependent_startup=true
 {# One daemon instead of FRR's mgmtd/zebra/staticd/bgpd/bfdd set: zebra-rs
    is a single process carrying the RIB and every protocol, so there is no
    inter-daemon socket to wait on and no zsocket.sh equivalent. #}
+{# --claim-main-bgp: this container shares the host's network namespace,
+   so a restart finds the previous instance's `proto bgp` routes still in
+   the kernel. zebra-rs is the only BGP speaker here, so it takes them
+   back as its own leftovers — replaced by what it learns again, swept
+   otherwise. Without the flag they come back as distance-0 kernel routes
+   that outrank the fresh BGP routes, and a path that has since gone away
+   stays in the kernel, APPL_DB and the ASIC. #}
 [program:zebra-rs]
-command=/usr/bin/zebra-rs --config-file /etc/zebra-rs/zebra-rs.conf
+command=/usr/bin/zebra-rs --claim-main-bgp --config-file /etc/zebra-rs/zebra-rs.conf
 priority=4
 autostart=false
 autorestart=false
