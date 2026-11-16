@@ -1,2 +1,8 @@
-{#- Port of dockers/docker-fpm-frr/frr/bgpd/templates/dynamic/delete.conf.j2. -#}
-delete router bgp neighbor {{ neighbor_addr }}
+{#- Port of dockers/docker-fpm-frr/frr/bgpd/templates/dynamic/delete.conf.j2.
+
+    FRR's `no neighbor NAME` removes a peer-group when NAME is one. In
+    zebra-rs a neighbor and a neighbor-group are different lists, and for
+    this family `neighbor_addr` is the group's name (the BGP_PEER_RANGE
+    key), so it is the group that has to go. bgpcfgd removes the listen
+    ranges first, in the same commit. -#}
+delete router bgp neighbor-group {{ neighbor_addr }}
