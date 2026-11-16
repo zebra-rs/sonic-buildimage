@@ -74,6 +74,24 @@ stderr_syslog=true
 dependent_startup=true
 dependent_startup_wait_for=fpmsyncd:running
 
+{# bgpmon publishes each neighbor's session state to STATE_DB
+   (NEIGH_STATE_TABLE), which system health and telemetry read. It polls
+   `vtysh -c 'show bgp summary json'`, answered here by zebra-rs's
+   FRR-compatible vtysh. Restarted if it dies, as in the FRR container,
+   and likewise not a critical process. #}
+[program:bgpmon]
+command=/usr/local/bin/bgpmon
+priority=7
+autostart=false
+autorestart=true
+startsecs=0
+stdout_logfile=NONE
+stdout_syslog=true
+stderr_logfile=NONE
+stderr_syslog=true
+dependent_startup=true
+dependent_startup_wait_for=zebra-rs:running
+
 {# fpmsyncd is unchanged from the FRR container — it is the whole point of
    the FPM approach that everything below it stays as it is. It listens on
    TCP 2620; zebra-rs dials out to it. #}

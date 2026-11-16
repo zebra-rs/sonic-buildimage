@@ -45,5 +45,13 @@ $(DOCKER_FPM_ZEBRA_RS)_RUN_OPT += -t --cap-add=NET_ADMIN --cap-add=SYS_ADMIN
 $(DOCKER_FPM_ZEBRA_RS)_RUN_OPT += -v /etc/sonic:/etc/sonic:ro
 $(DOCKER_FPM_ZEBRA_RS)_RUN_OPT += -v /etc/localtime:/etc/localtime:ro
 
+# Host-side wrappers, the same two scripts docker-fpm-frr installs: they
+# `docker exec` vtysh in the bgp container, which here is zebra-rs's
+# FRR-compatible one. rvtysh is the read-only form `show` runs under sudo.
+# FRR's TSA/TSB/TSC, idf_isolation and prefix_list are not shipped: they
+# drive configuration zebra-rs has no counterpart for yet.
+$(DOCKER_FPM_ZEBRA_RS)_BASE_IMAGE_FILES += vtysh:/usr/bin/vtysh
+$(DOCKER_FPM_ZEBRA_RS)_BASE_IMAGE_FILES += rvtysh:/usr/bin/rvtysh
+
 SONIC_TRIXIE_DOCKERS += $(DOCKER_FPM_ZEBRA_RS)
 SONIC_TRIXIE_DBG_DOCKERS += $(DOCKER_FPM_ZEBRA_RS_DBG)

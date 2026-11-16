@@ -50,6 +50,12 @@ $(addprefix $(DEST)/, $(MAIN_TARGET)): $(DEST)/% :
 	install -m 0755 zebra-rs/target/release/vtyctl    $(STAGE)/usr/bin/
 	install -m 0755 zebra-rs/target/release/vtyhelper $(STAGE)/usr/bin/
 
+	# FRR's vtysh, as far as SONiC's tooling uses it: started under this
+	# name vtyctl takes FRR's command line (`-c 'show bgp summary json'`)
+	# and answers the json forms in FRR's schema. bgpmon, route_check and
+	# sonic-utilities' `show ip bgp`/`show ip route` all run `vtysh`.
+	ln -s vtyctl $(STAGE)/usr/bin/vtysh
+
 	# The daemon loads its YANG schemas at runtime and refuses to start
 	# without them; they are program data, not operator config, hence
 	# /usr/share.
