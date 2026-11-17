@@ -1,5 +1,6 @@
 import traceback
-from .log import log_crit, log_err, log_debug
+from .log import log_crit, log_err, log_warn, log_debug
+from .dialect import is_zebra_rs
 from .manager import Manager
 from .template import TemplateFabric
 import socket
@@ -26,6 +27,7 @@ class StaticRouteMgr(Manager):
         self.static_routes = {}
         self.vrf_pending_redistribution = set()
         self.config_db = None
+        self.zebra_rs = is_zebra_rs()
 
     OP_DELETE = 'DELETE'
     OP_ADD = 'ADD'
@@ -48,6 +50,10 @@ class StaticRouteMgr(Manager):
         # bfd enabled route would be handled in staticroutebfd, skip here
         if bfd_enable and bfd_enable[0].lower() == "true":
             log_debug("{} static route {} bfd flag is true".format(self.db_name, key))
+            if self.zebra_rs:
+                # Nothing runs staticroutebfd in the zebra-rs container, so
+                # nobody writes this route to APPL_DB once its sessions are up.
+                log_warn("{} static route {}: bfd is not supported with zebra-rs, the route is not installed".format(self.db_name, key))
             tmp_nh_set, tmp_route_tag = self.static_routes.get(vrf, {}).get(ip_prefix, (IpNextHopSet(is_ipv6), route_tag))
             if tmp_nh_set: #clear nexthop set if it is not empty
                 log_debug("{} static route {} bfd flag is true, cur_nh is not empty, clear it".format(self.db_name, key))
@@ -57,7 +63,19 @@ class StaticRouteMgr(Manager):
         try:
             ip_nh_set = IpNextHopSet(is_ipv6, bkh_list, nh_list, intf_list, dist_list, nh_vrf_list)
             cur_nh_set, cur_route_tag = self.static_routes.get(vrf, {}).get(ip_prefix, (IpNextHopSet(is_ipv6), route_tag))
-            cmd_list = self.static_route_commands(ip_nh_set, cur_nh_set, ip_prefix, vrf, route_tag, cur_route_tag)
+            if self.zebra_rs:
+                reason = self.zebra_rs_unsupported(vrf, ip_nh_set, route_tag)
+                if reason:
+                    # Refused rather than installed in part. A route that
+                    # was installed in a form zebra-rs can express and is
+                    # now changed to one it cannot is removed, so the
+                    # daemon is not left with the old version of it.
+                    log_err("{} static route {}: {}, the route is not installed".format(self.db_name, key, reason))
+                    self.del_handler(key)
+                    return True
+                cmd_list = self.zebra_rs_route_commands(ip_nh_set, cur_nh_set, ip_prefix)
+            else:
+                cmd_list = self.static_route_commands(ip_nh_set, cur_nh_set, ip_prefix, vrf, route_tag, cur_route_tag)
         except Exception as exc:
             log_crit("Got an exception %s: Traceback: %s" % (str(exc), traceback.format_exc()))
             return False
@@ -137,7 +155,10 @@ class StaticRouteMgr(Manager):
 
         ip_nh_set = IpNextHopSet(is_ipv6)
         cur_nh_set, route_tag = self.static_routes.get(vrf, {}).get(ip_prefix, (IpNextHopSet(is_ipv6), self.ROUTE_ADVERTISE_DISABLE_TAG))
-        cmd_list = self.static_route_commands(ip_nh_set, cur_nh_set, ip_prefix, vrf, route_tag, route_tag)
+        if self.zebra_rs:
+            cmd_list = self.zebra_rs_route_commands(ip_nh_set, cur_nh_set, ip_prefix)
+        else:
+            cmd_list = self.static_route_commands(ip_nh_set, cur_nh_set, ip_prefix, vrf, route_tag, route_tag)
 
         # Disable redistribution of static routes when it is the last one to delete
         if self.static_routes.get(vrf, {}).keys() == {ip_prefix}:
@@ -218,8 +239,74 @@ class StaticRouteMgr(Manager):
             ' tag {}'.format(route_tag)
         )
 
+    def zebra_rs_unsupported(self, vrf, ip_nh_set, route_tag):
+        """
+        Say why zebra-rs cannot express a static route, or return None.
+        A zebra-rs static route is a prefix with a list of next hop
+        addresses (or the keyword blackhole) and one distance for the route.
+        """
+        if vrf != 'default':
+            return "a static route in vrf {} is not supported with zebra-rs".format(vrf)
+        if route_tag == self.ROUTE_ADVERTISE_DISABLE_TAG:
+            # FRR keeps such a route out of BGP by its tag, through the
+            # route-map on `redistribute static`. zebra-rs does not apply
+            # the policy of a redistribute source yet, so the route would be
+            # advertised. Not installing it is the safe refusal.
+            return "advertise=false is not supported with zebra-rs"
+        if len({nh.distance for nh in ip_nh_set}) > 1:
+            return "next hops with different distances are not supported with zebra-rs"
+        if len(ip_nh_set) > 1 and any(nh.blackhole == 'true' for nh in ip_nh_set):
+            return "blackhole together with other next hops is not supported with zebra-rs"
+        for nh in ip_nh_set:
+            if nh.blackhole == 'true':
+                continue
+            # `config route add` always writes nexthop-vrf, naming the
+            # route's own vrf when the next hop is not in another one.
+            if nh.nh_vrf and nh.nh_vrf != vrf:
+                return "a next hop in another vrf is not supported with zebra-rs"
+            if nh.is_portchannel() or nh.is_zero_ip():
+                return "a next hop given by interface only is not supported with zebra-rs"
+            if nh.af == socket.AF_INET6 and nh.ip.lower().startswith('fe80'):
+                return "a link-local next hop is not supported with zebra-rs"
+        return None
+
+    @staticmethod
+    def zebra_rs_nexthop(ip_nh):
+        """ The key of a next hop in zebra-rs's list: its address, or blackhole """
+        return 'blackhole' if ip_nh.blackhole == 'true' else ip_nh.ip
+
+    def zebra_rs_route_commands(self, ip_nh_set, cur_nh_set, ip_prefix):
+        """
+        Lines that take a route from cur_nh_set to ip_nh_set. Both sets have
+        passed zebra_rs_unsupported, so each has one distance. An `ifname`
+        beside an address is not written: zebra-rs resolves the interface
+        from the address.
+        """
+        route = "router static {} route {}".format(
+            'ipv6' if TemplateFabric.is_ipv6(ip_prefix) else 'ipv4', ip_prefix)
+        if not ip_nh_set:
+            # A route cannot be left without next hops: remove it whole.
+            return ["delete " + route] if cur_nh_set else []
+
+        distance = lambda nh_set: next(iter(nh_set)).distance if nh_set else 0
+        new = {self.zebra_rs_nexthop(nh) for nh in ip_nh_set}
+        cur = {self.zebra_rs_nexthop(nh) for nh in cur_nh_set}
+        # Additions first, so the list is never empty inside the batch.
+        cmd_list = ["set {} nexthop {}".format(route, nh) for nh in sorted(new - cur)]
+        cmd_list += ["delete {} nexthop {}".format(route, nh) for nh in sorted(cur - new)]
+        if distance(ip_nh_set) != distance(cur_nh_set):
+            if distance(ip_nh_set):
+                cmd_list.append("set {} distance {}".format(route, distance(ip_nh_set)))
+            else:
+                cmd_list.append("delete {} distance".format(route))
+        return cmd_list
+
+    ZEBRA_RS_REDISTRIBUTE = ["router bgp afi-safi %s redistribute static" % af for af in ("ipv4", "ipv6")]
+
     def enable_redistribution_command(self, vrf):
         log_debug("Enabling static route redistribution")
+        if self.zebra_rs:
+            return ["set " + line for line in self.ZEBRA_RS_REDISTRIBUTE]
         cmd_list = []
         cmd_list.append("route-map STATIC_ROUTE_FILTER permit 10")
         cmd_list.append(" match tag %s" % self.ROUTE_ADVERTISE_ENABLE_TAG)
@@ -237,6 +324,8 @@ class StaticRouteMgr(Manager):
 
     def disable_redistribution_command(self, vrf):
         log_debug("Disabling static route redistribution")
+        if self.zebra_rs:
+            return ["delete " + line for line in self.ZEBRA_RS_REDISTRIBUTE]
         cmd_list = []
         bgp_asn = self.directory.get_slot("CONFIG_DB", swsscommon.CFG_DEVICE_METADATA_TABLE_NAME)["localhost"]["bgp_asn"]
         if vrf == 'default':

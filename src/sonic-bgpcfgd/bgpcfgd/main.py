@@ -79,10 +79,15 @@ def do_work_zebra_rs():
         BGPPeerMgrBase(common_objs, "CONFIG_DB", swsscommon.CFG_BGP_NEIGHBOR_TABLE_NAME, "general", True),
         BGPPeerMgrBase(common_objs, "CONFIG_DB", "BGP_PEER_RANGE", "dynamic", False),
         BGPPeerMgrBase(common_objs, "CONFIG_DB", "BGP_SENTINELS", "sentinels", False),
+        # Static Route Managers. The APPL_DB one is fed by staticroutebfd
+        # on FRR; nothing writes that table in the zebra-rs container yet,
+        # and it is subscribed so that a route put there is still honored.
+        StaticRouteMgr(common_objs, "CONFIG_DB", "STATIC_ROUTE"),
+        StaticRouteMgr(common_objs, "APPL_DB", "STATIC_ROUTE"),
     ]
     log_warn("zebra-rs: not ported yet, their tables are ignored: "
              "BGP_INTERNAL_NEIGHBOR, BGP_MONITORS, BGP_VOQ_CHASSIS_NEIGHBOR, "
-             "BGP_ALLOWED_PREFIXES, BGP_BBR, STATIC_ROUTE, ADVERTISE_NETWORK, BGP_PROFILE, "
+             "BGP_ALLOWED_PREFIXES, BGP_BBR, ADVERTISE_NETWORK, BGP_PROFILE, "
              "BGP_DEVICE_GLOBAL's WCMP and IDF isolation (TSA is honored), BGP_AGGREGATE_ADDRESS, SRV6, PREFIX_LIST, "
              "software BFD, set-src")
 
