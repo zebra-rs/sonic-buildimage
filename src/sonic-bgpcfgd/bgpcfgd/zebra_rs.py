@@ -95,7 +95,7 @@ class ZebraRs(object):
         :param config_text: `set` / `delete` lines, one per line
         :return: True on success
         """
-        config_text = ZebraRs.drop_redundant_sets(config_text)
+        config_text = ZebraRs.reconcile(config_text)
         if config_text is None:
             return True
         fd, tmp_filename = tempfile.mkstemp(dir="/tmp")
@@ -129,35 +129,59 @@ class ZebraRs(object):
         return ret_code == 0 and not rejected
 
     @staticmethod
-    def drop_redundant_sets(config_text):
+    def reconcile(config_text):
         """
-        Remove `set` lines the daemon already has, and repeats within the
-        batch.
+        Reduce a batch to what changes the running configuration: drop
+        `set` lines the daemon already has, repeats within the batch, and
+        `delete` lines for things that are not there.
 
-        bgpcfgd re-pushes a peer's whole policy and peer-group text for
-        every peer that uses them. FRR absorbs that: re-entering a line is
-        a no-op. zebra-rs does not for a leaf-list — `set community-set X
-        members A` appends, so the same member is stored once per push
-        (32 neighbors on a stock T1 left 32 copies of each member in the
-        running config). Filtering against the running config makes a
-        push idempotent for every statement type, and keeps the commit
-        small.
+        Both halves make up for something FRR absorbs and zebra-rs does
+        not, and in zebra-rs either one costs the whole commit or corrupts
+        it:
 
-        A batch containing a `delete` is passed through untouched: a
-        later `set` there may be re-creating what the delete removes, and
-        the running config read here predates both.
+        - bgpcfgd re-pushes a peer's whole policy and peer-group text for
+          every peer that uses them. In FRR re-entering a line is a no-op.
+          In zebra-rs `set` on a leaf-list appends, so `set community-set
+          X members A` stored the member once per push (32 neighbors on a
+          stock T1 left 32 copies).
+        - bgpcfgd removes things that may not exist (Traffic Shift Back
+          when the device was never shifted away). FRR's `no route-map`
+          of nothing is a no-op. zebra-rs rejects a `delete` of a path
+          that is not there, and a rejected line discards the commit.
+
+        Order within the batch is respected: a `set` that follows a
+        `delete` covering it is kept even if the running config has the
+        line, since the delete removes it first; and a `delete` of
+        something an earlier `set` in the batch creates is kept.
         :return: the text to apply, or None if nothing is left to do
         """
         lines = [line.strip() for line in config_text.splitlines() if line.strip()]
-        if any(line.startswith("delete ") for line in lines):
-            return "\n".join(lines)
         have = set(line.strip() for line in ZebraRs.get_config().splitlines())
-        seen = set()
+
+        def covers(path, line):
+            return line == "set " + path or line.startswith("set " + path + " ")
+
+        added = []     # `set` lines kept so far
+        deleted = []   # paths deleted so far
         out = []
         for line in lines:
-            if line in have or line in seen:
+            if line.startswith("delete "):
+                path = line[len("delete "):].strip()
+                present = any(covers(path, h) for h in have) or any(covers(path, a) for a in added)
+                if not present or path in deleted:
+                    continue
+                deleted.append(path)
+                added = [a for a in added if not covers(path, a)]
+                out.append(line)
                 continue
-            seen.add(line)
+            if any(covers(path, line) for path in deleted):
+                if line not in added:
+                    added.append(line)
+                    out.append(line)
+                continue
+            if line in have or line in added:
+                continue
+            added.append(line)
             out.append(line)
         return "\n".join(out) if out else None
 

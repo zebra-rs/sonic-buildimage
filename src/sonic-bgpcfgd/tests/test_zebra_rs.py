@@ -180,14 +180,84 @@ def test_write_with_nothing_new_does_not_call_apply():
     assert applied == []
 
 
-def test_write_passes_a_batch_with_a_delete_through_untouched():
-    # A `set` after a `delete` may be re-creating what the delete removes;
-    # the running config read before the batch cannot tell.
+def test_write_keeps_a_set_that_follows_a_delete_covering_it():
+    # Delete-then-recreate: the running config has the line, but the
+    # delete ahead of it removes it, so the set is not redundant.
     applied = []
     bgpcfgd.zebra_rs.run_command = _fake_daemon("set router bgp neighbor 10.0.0.1 remote-as 65200\n", applied)
     text = (
         "delete router bgp neighbor 10.0.0.1\n"
         "set router bgp neighbor 10.0.0.1 remote-as 65200\n"
+    )
+    assert bgpcfgd.zebra_rs.ZebraRs.write(text)
+    assert applied == [text]
+
+
+def test_write_drops_a_delete_of_what_is_not_there():
+    # zebra-rs rejects a delete of a missing path and a rejected line
+    # discards the commit. Traffic Shift Back on a device that was never
+    # shifted away deletes entries that do not exist.
+    applied = []
+    bgpcfgd.zebra_rs.run_command = _fake_daemon(
+        "set policy TO_BGP_PEER_V4\n"
+        "set policy TO_BGP_PEER_V4 entry 100\n"
+        "set policy TO_BGP_PEER_V4 entry 100 action permit\n",
+        applied,
+    )
+    assert bgpcfgd.zebra_rs.ZebraRs.write(
+        "delete policy TO_BGP_PEER_V4 entry 20\n"
+        "delete policy TO_BGP_PEER_V4 entry 30\n"
+        "delete policy TO_BGP_PEER_V4 entry 40\n"
+    )
+    assert applied == []
+
+
+def test_write_keeps_a_delete_of_what_is_there_and_only_that():
+    applied = []
+    bgpcfgd.zebra_rs.run_command = _fake_daemon(
+        "set policy TO_BGP_PEER_V4 entry 20\n"
+        "set policy TO_BGP_PEER_V4 entry 20 action permit\n"
+        "set policy TO_BGP_PEER_V4 entry 100 action permit\n",
+        applied,
+    )
+    assert bgpcfgd.zebra_rs.ZebraRs.write(
+        "delete policy TO_BGP_PEER_V4 entry 20\n"
+        "delete policy TO_BGP_PEER_V4 entry 30\n"
+    )
+    assert applied == ["delete policy TO_BGP_PEER_V4 entry 20\n"]
+
+
+def test_write_does_not_take_entry_2_for_entry_20():
+    # Paths are matched on whole words: `entry 2` is not there just
+    # because `entry 20` is.
+    applied = []
+    bgpcfgd.zebra_rs.run_command = _fake_daemon("set policy P entry 20 action permit\n", applied)
+    assert bgpcfgd.zebra_rs.ZebraRs.write("delete policy P entry 2\n")
+    assert applied == []
+
+
+def test_write_still_drops_redundant_sets_beside_an_unrelated_delete():
+    # A delete elsewhere in the batch used to switch the filter off, and
+    # a leaf-list member pushed with it was stored a second time.
+    applied = []
+    bgpcfgd.zebra_rs.run_command = _fake_daemon(
+        "set community-set C members no-export\n"
+        "set policy P entry 20 action permit\n",
+        applied,
+    )
+    assert bgpcfgd.zebra_rs.ZebraRs.write(
+        "delete policy P entry 20\n"
+        "set community-set C members no-export\n"
+    )
+    assert applied == ["delete policy P entry 20\n"]
+
+
+def test_write_keeps_a_delete_of_what_the_batch_itself_creates():
+    applied = []
+    bgpcfgd.zebra_rs.run_command = _fake_daemon("", applied)
+    text = (
+        "set policy P entry 20 action permit\n"
+        "delete policy P entry 20\n"
     )
     assert bgpcfgd.zebra_rs.ZebraRs.write(text)
     assert applied == [text]
