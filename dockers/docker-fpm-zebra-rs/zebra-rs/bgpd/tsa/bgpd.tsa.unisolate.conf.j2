@@ -1,0 +1,16 @@
+{#- Traffic Shift Back: remove what bgpd.tsa.isolate.conf.j2 added.
+    Port of dockers/docker-fpm-frr/frr/bgpd/tsa/bgpd.tsa.unisolate.conf.j2.
+
+    zebra-rs rejects a `delete` of something that is not there, and a
+    rejected line discards the whole commit. bgpcfgd's backend
+    (ZebraRs.reconcile) drops such lines before applying, so this stays a
+    plain list of what to remove, like FRR's `no route-map` lines. The
+    community-sets are left defined; they are harmless and the next
+    isolate reuses them. -#}
+{% if internal_route_map == '1' %}
+delete policy {{ route_map_name }} entry 20
+{% else %}
+delete policy {{ route_map_name }} entry 20
+delete policy {{ route_map_name }} entry 30
+delete policy {{ route_map_name }} entry 40
+{% endif %}

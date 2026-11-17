@@ -1,0 +1,35 @@
+{#- Traffic Shift Away, as zebra-rs `set` statements.
+    Port of dockers/docker-fpm-frr/frr/bgpd/tsa/bgpd.tsa.isolate.conf.j2.
+
+    Rendered once per outbound policy in use (DeviceGlobalCfgMgr finds
+    them in the running config). The entries go in below the policy's own
+    `entry 100 action permit`, so while they are present:
+
+      external policy:  20  the loopback, re-marked with the traffic-shift
+                            community, is still advertised
+                        30  so is a route carrying the internal tag
+                        40  everything else is denied, i.e. withdrawn
+      internal policy:  20  everything is advertised, with no-export added
+
+    FRR's `set community C` takes the value inline; zebra-rs references a
+    named community-set, so the two sets used are defined here. Without
+    `additive` the set replaces the route's communities, as in FRR.
+
+    Tried on a SONiC VS against an FRR peer: applying the external form
+    withdraws a non-loopback network and re-advertises the loopback with
+    the community; deleting the three entries restores both. -#}
+{% if internal_route_map == '1' %}
+set community-set TSA_NO_EXPORT members no-export
+set policy {{ route_map_name }} entry 20 action permit
+set policy {{ route_map_name }} entry 20 set community name TSA_NO_EXPORT
+set policy {{ route_map_name }} entry 20 set community additive
+{% else %}
+set community-set TSA_COMMUNITY members {{ constants.bgp.traffic_shift_community }}
+set policy {{ route_map_name }} entry 20 action permit
+set policy {{ route_map_name }} entry 20 match prefix-set PL_Loopback{{ ip_version }}
+set policy {{ route_map_name }} entry 20 set community name TSA_COMMUNITY
+set policy {{ route_map_name }} entry 30 action permit
+set policy {{ route_map_name }} entry 30 match tag {{ constants.bgp.internal_community_match_tag }}
+set policy {{ route_map_name }} entry 30 set community name TSA_COMMUNITY
+set policy {{ route_map_name }} entry 40 action deny
+{% endif %}

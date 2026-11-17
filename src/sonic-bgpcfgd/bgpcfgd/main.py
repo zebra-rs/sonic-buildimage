@@ -61,14 +61,6 @@ def do_work_zebra_rs():
         'constants': read_constants(),
         'state_db_conn': swsscommon.DBConnector("STATE_DB", 0)
     }
-    # The peer managers wait on the device-global state that
-    # DeviceGlobalCfgMgr publishes. That manager is not ported, so publish
-    # its defaults (no TSA, not isolated) here; otherwise no peer would
-    # ever be configured. A box with TSA enabled in CONFIG_DB is therefore
-    # NOT isolated under zebra-rs yet — see the warning below.
-    for key, value in (("tsa_enabled", DeviceGlobalCfgMgr.TSA_DEFAULTS),
-                       ("idf_isolation_state", DeviceGlobalCfgMgr.IDF_DEFAULTS)):
-        common_objs['directory'].put("CONFIG_DB", swsscommon.CFG_BGP_DEVICE_GLOBAL_TABLE_NAME, key, value)
     managers = [
         # Config DB managers
         BGPDataBaseMgr(common_objs, "CONFIG_DB", swsscommon.CFG_DEVICE_METADATA_TABLE_NAME),
@@ -80,6 +72,9 @@ def do_work_zebra_rs():
         InterfaceMgr(common_objs, "CONFIG_DB", swsscommon.CFG_LAG_INTF_TABLE_NAME),
         InterfaceMgr(common_objs, "CONFIG_DB", swsscommon.CFG_VOQ_INBAND_INTERFACE_TABLE_NAME),
         InterfaceMgr(common_objs, "CONFIG_DB", swsscommon.CFG_VLAN_SUB_INTF_TABLE_NAME),
+        # Device Global Manager: TSA. Its W-ECMP and IDF isolation halves
+        # are refused under zebra-rs (managers_device_global.py).
+        DeviceGlobalCfgMgr(common_objs, "CONFIG_DB", swsscommon.CFG_BGP_DEVICE_GLOBAL_TABLE_NAME),
         # Peer Managers — the template families ported so far
         BGPPeerMgrBase(common_objs, "CONFIG_DB", swsscommon.CFG_BGP_NEIGHBOR_TABLE_NAME, "general", True),
         BGPPeerMgrBase(common_objs, "CONFIG_DB", "BGP_PEER_RANGE", "dynamic", False),
@@ -88,7 +83,7 @@ def do_work_zebra_rs():
     log_warn("zebra-rs: not ported yet, their tables are ignored: "
              "BGP_INTERNAL_NEIGHBOR, BGP_MONITORS, BGP_VOQ_CHASSIS_NEIGHBOR, "
              "BGP_ALLOWED_PREFIXES, BGP_BBR, STATIC_ROUTE, ADVERTISE_NETWORK, BGP_PROFILE, "
-             "BGP_DEVICE_GLOBAL (TSA, WCMP, IDF isolation), BGP_AGGREGATE_ADDRESS, SRV6, PREFIX_LIST, "
+             "BGP_DEVICE_GLOBAL's WCMP and IDF isolation (TSA is honored), BGP_AGGREGATE_ADDRESS, SRV6, PREFIX_LIST, "
              "software BFD, set-src")
 
     runner = Runner(common_objs['cfg_mgr'])

@@ -2,6 +2,7 @@ import re
 import jinja2
 
 from .manager import Manager
+from .dialect import is_zebra_rs
 from .log import log_err, log_debug, log_notice
 from swsscommon import swsscommon
 from sonic_py_common import device_info
@@ -25,11 +26,23 @@ class DeviceGlobalCfgMgr(Manager):
         self.directory = common_objs['directory']
         self.cfg_mgr = common_objs['cfg_mgr']
         self.constants = common_objs['constants']
+        self.zebra_rs = is_zebra_rs()
         self.tsa_template = common_objs['tf'].from_file("bgpd/tsa/bgpd.tsa.isolate.conf.j2")
         self.tsb_template = common_objs['tf'].from_file("bgpd/tsa/bgpd.tsa.unisolate.conf.j2")
-        self.wcmp_template = common_objs['tf'].from_file("bgpd/wcmp/bgpd.wcmp.conf.j2")
-        self.idf_isolate_template = common_objs['tf'].from_file("bgpd/idf_isolate/idf_isolate.conf.j2")
-        self.idf_unisolate_template = common_objs['tf'].from_file("bgpd/idf_isolate/idf_unisolate.conf.j2")        
+        if self.zebra_rs:
+            # Only TSA is ported to the zebra-rs dialect. W-ECMP needs
+            # `set extcommunity bandwidth`, which zebra-rs policy does not
+            # have, and IDF isolation needs the CHECK_IDF_ISOLATION call
+            # chain, which the zebra-rs policy templates do not lay down
+            # yet. Both are refused loudly below rather than rendered from
+            # FRR templates the daemon would reject.
+            self.wcmp_template = None
+            self.idf_isolate_template = None
+            self.idf_unisolate_template = None
+        else:
+            self.wcmp_template = common_objs['tf'].from_file("bgpd/wcmp/bgpd.wcmp.conf.j2")
+            self.idf_isolate_template = common_objs['tf'].from_file("bgpd/idf_isolate/idf_isolate.conf.j2")
+            self.idf_unisolate_template = common_objs['tf'].from_file("bgpd/idf_isolate/idf_unisolate.conf.j2")
         self.directory.subscribe([("CONFIG_DB", swsscommon.CFG_DEVICE_METADATA_TABLE_NAME, "localhost/type"),], self.handle_type_update)
         super(DeviceGlobalCfgMgr, self).__init__(
             common_objs,
@@ -147,6 +160,14 @@ class DeviceGlobalCfgMgr(Manager):
             log_err("W-ECMP: invalid value({}) is provided".format(status))
             return False
 
+        if self.zebra_rs:
+            # Returning False leaves the directory at "false", which is
+            # the truth, and the request is retried on the next change.
+            if status == "true":
+                log_err("W-ECMP: not supported with zebra-rs, wcmp_enabled is ignored")
+                return False
+            return True
+
         if status == "true":
             log_notice("DeviceGlobalCfgMgr:: Enabling W-ECMP...")
         else:
@@ -228,7 +249,12 @@ class DeviceGlobalCfgMgr(Manager):
 
     def __extract_out_route_map_names(self, cmds):
         route_map_names = set()
-        out_route_map = re.compile(r'^\s*neighbor \S+ route-map (\S+) out$')
+        if self.zebra_rs:
+            # A neighbor's or neighbor-group's outbound policy, as the
+            # templates set it and as `show running-config formal` prints it.
+            out_route_map = re.compile(r'^\s*set router bgp (?:neighbor|neighbor-group) \S+ policy out (\S+)$')
+        else:
+            out_route_map = re.compile(r'^\s*neighbor \S+ route-map (\S+) out$')
         for line in cmds:
             result = out_route_map.match(line)
             if result:
@@ -265,6 +291,12 @@ class DeviceGlobalCfgMgr(Manager):
             log_debug("DeviceGlobalCfgMgr:: Skipping IDF isolation configuration on %s" % self.switch_role)
             return True
 
+        if self.zebra_rs:
+            if idf_isolation_state != "unisolated":
+                log_err("IDF: not supported with zebra-rs, idf_isolation_state '{}' is ignored".format(idf_isolation_state))
+                return False
+            return True
+
         cmd = "\n"
         if idf_isolation_state == "unisolated":
             cmd += self.idf_unisolate_template.render(constants=self.constants)
@@ -284,6 +316,9 @@ class DeviceGlobalCfgMgr(Manager):
         cmd = ""
         if self.directory.path_exist("CONFIG_DB", swsscommon.CFG_BGP_DEVICE_GLOBAL_TABLE_NAME, "idf_isolation_state"):
             idf_isolation_state = self.directory.get_slot("CONFIG_DB", swsscommon.CFG_BGP_DEVICE_GLOBAL_TABLE_NAME)["idf_isolation_state"]
+            if idf_isolation_state != "unisolated" and self.zebra_rs:
+                log_err("IDF: not supported with zebra-rs, the new peer-group is not isolated")
+                return cmd
             if idf_isolation_state != "unisolated":
                 log_notice("DeviceGlobalCfgMgr:: IDF is isolated. Applying required route-maps")
                 cmd = self.idf_isolate_template.render(isolation_status=idf_isolation_state, constants=self.constants)

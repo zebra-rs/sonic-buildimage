@@ -27,12 +27,8 @@ class BGPPeerGroupMgr(object):
         tf = common_objs['tf']
         self.policy_template = tf.from_file(base_template + "policies.conf.j2")
         self.peergroup_template = tf.from_file(base_template + "peer-group.conf.j2")
-        # TSA and IDF isolation are applied as FRR route-map text generated
-        # by DeviceGlobalCfgMgr; that manager has no zebra-rs dialect yet,
-        # so it is not constructed there and the peer-group goes in without
-        # those route-maps.
         self.zebra_rs = is_zebra_rs()
-        self.device_global_cfgmgr = None if self.zebra_rs else DeviceGlobalCfgMgr(common_objs, "CONFIG_DB", swsscommon.CFG_BGP_DEVICE_GLOBAL_TABLE_NAME)
+        self.device_global_cfgmgr = DeviceGlobalCfgMgr(common_objs, "CONFIG_DB", swsscommon.CFG_BGP_DEVICE_GLOBAL_TABLE_NAME)
 
     def update(self, name, **kwargs):
         """
@@ -73,10 +69,14 @@ class BGPPeerGroupMgr(object):
                 return False
             try:
                 pg = self.peergroup_template.render(**kwargs)
+                # A peer-group created while the device is shifted away
+                # must come up isolated, as in the FRR path below.
+                tsa_rm = self.device_global_cfgmgr.check_state_and_get_tsa_routemaps(pg)
+                self.device_global_cfgmgr.check_state_and_get_idf_isolation_routemaps()
             except jinja2.TemplateError as e:
                 log_err("Can't render peer-group template: '%s': %s" % (name, str(e)))
                 return False
-            self.update_entity(pg, "Peer-group for peer '%s'" % name)
+            self.update_entity(pg + "\n" + tsa_rm, "Peer-group for peer '%s'" % name)
             return True
 
         try:
