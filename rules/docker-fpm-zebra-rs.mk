@@ -48,13 +48,25 @@ $(DOCKER_FPM_ZEBRA_RS)_RUN_OPT += -v /etc/localtime:/etc/localtime:ro
 # Host-side wrappers, the same two scripts docker-fpm-frr installs: they
 # `docker exec` vtysh in the bgp container, which here is zebra-rs's
 # FRR-compatible one. rvtysh is the read-only form `show` runs under sudo.
-# FRR's TSA/TSB/TSC, idf_isolation and prefix_list are not shipped: they
-# drive configuration zebra-rs has no counterpart for yet.
+# FRR's idf_isolation and prefix_list are not shipped: they drive
+# configuration zebra-rs has no counterpart for yet.
 $(DOCKER_FPM_ZEBRA_RS)_BASE_IMAGE_FILES += vtysh:/usr/bin/vtysh
 $(DOCKER_FPM_ZEBRA_RS)_BASE_IMAGE_FILES += rvtysh:/usr/bin/rvtysh
 # zebra-rs's own interactive shell, which FRR has no counterpart for:
 # `vty` on the host opens it in the bgp container.
 $(DOCKER_FPM_ZEBRA_RS)_BASE_IMAGE_FILES += vty:/usr/bin/vty
+
+# Traffic shift: TSA/TSB write BGP_DEVICE_GLOBAL in CONFIG_DB, which
+# bgpcfgd turns into policy entries, and TSC asks the container. None of
+# that depends on the routing stack, so these are docker-fpm-frr's own
+# files, taken from there instead of copied. What differs is the TSC
+# inside the container, which this image ships itself (Dockerfile.j2).
+DOCKER_FPM_ZEBRA_RS_FRR_FILES = ../../docker-fpm-frr/base_image_files
+$(DOCKER_FPM_ZEBRA_RS)_BASE_IMAGE_FILES += $(DOCKER_FPM_ZEBRA_RS_FRR_FILES)/TSA:/usr/bin/TSA
+$(DOCKER_FPM_ZEBRA_RS)_BASE_IMAGE_FILES += $(DOCKER_FPM_ZEBRA_RS_FRR_FILES)/TSB:/usr/bin/TSB
+$(DOCKER_FPM_ZEBRA_RS)_BASE_IMAGE_FILES += $(DOCKER_FPM_ZEBRA_RS_FRR_FILES)/TSC:/usr/bin/TSC
+$(DOCKER_FPM_ZEBRA_RS)_BASE_IMAGE_FILES += $(DOCKER_FPM_ZEBRA_RS_FRR_FILES)/TS:/usr/bin/TS
+$(DOCKER_FPM_ZEBRA_RS)_BASE_IMAGE_FILES += $(DOCKER_FPM_ZEBRA_RS_FRR_FILES)/platform_utils:/usr/bin/platform_utils
 
 SONIC_TRIXIE_DOCKERS += $(DOCKER_FPM_ZEBRA_RS)
 SONIC_TRIXIE_DBG_DOCKERS += $(DOCKER_FPM_ZEBRA_RS_DBG)

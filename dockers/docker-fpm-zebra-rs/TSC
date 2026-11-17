@@ -1,0 +1,45 @@
+#!/bin/bash
+# TSC: report whether the traffic-shift (TSA) entries are installed.
+#
+# The container-side half of the host's `TSC`, which runs this through
+# `docker exec`. It is the zebra-rs counterpart of docker-fpm-frr's
+# TSC/TS pair, and prints the same four answers.
+#
+# bgpcfgd isolates the device by adding entries 20, 30 and 40 to every
+# outbound policy of an external BGP peer (bgpd/tsa/ in the templates).
+# This reads the running configuration and checks those entries, so it
+# reports what zebra-rs is doing, not what CONFIG_DB asks for.
+
+config=$(vtyctl show 'show running-config formal') || {
+    echo "System Mode: Unknown (cannot read the zebra-rs configuration)"
+    exit 1
+}
+
+# Policies attached outbound to a neighbor or a neighbor-group. As in
+# FRR's script only the per-address-family ones (V4/V6 in the name) count,
+# and policies of internal sessions are skipped: on those TSA only adds
+# no-export, which says nothing about the device's mode.
+policies=$(echo "$config" |
+    sed -nE 's/^set router bgp (neighbor|neighbor-group) \S+ policy out (\S+)$/\2/p' |
+    grep -E 'V4|V6' | grep -vE '_INTERNAL_|VOQ_' | sort -u)
+
+expected=0
+installed=0
+for policy in $policies; do
+    for entry in 20 30 40; do
+        expected=$((expected + 1))
+        if echo "$config" | grep -qE "^set policy $policy entry $entry( |\$)"; then
+            installed=$((installed + 1))
+        fi
+    done
+done
+
+if [[ $expected -eq 0 ]]; then
+    echo "System Mode: No external neighbors"
+elif [[ $installed -eq 0 ]]; then
+    echo "System Mode: Normal"
+elif [[ $installed -eq $expected ]]; then
+    echo "System Mode: Maintenance"
+else
+    echo "System Mode: Not consistent"
+fi

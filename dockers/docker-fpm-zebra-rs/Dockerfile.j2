@@ -26,7 +26,8 @@ RUN apt-get update && \
 
 COPY ["docker_init.sh", "/usr/bin/"]
 COPY ["zebra-rs", "/usr/share/sonic/templates"]
-RUN chmod a+x /usr/bin/docker_init.sh
+COPY ["TSC", "/usr/bin/TSC"]
+RUN chmod a+x /usr/bin/docker_init.sh /usr/bin/TSC
 
 FROM $BASE
 
