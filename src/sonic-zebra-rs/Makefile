@@ -38,6 +38,15 @@ $(addprefix $(DEST)/, $(MAIN_TARGET)): $(DEST)/% :
 	    /usr/.cargo-zebra-rs/bin/cargo-auditable auditable build --release --locked \
 	    --bin zebra-rs --bin vtyctl --bin vtyhelper
 
+	# vty, the interactive shell: GNU bash with zebra-rs's CLI hooks, which
+	# calls vtyhelper for every command. Its Makefile fetches the bash
+	# tarball (checked against a pinned SHA-256) and applies the patches
+	# kept in the tree. The cache is kept inside the build directory: the
+	# default is under $$HOME, which is not a place a package build in the
+	# slave should write to. bison, xxd and the ncurses headers it needs
+	# are already in the slave.
+	$(MAKE) -C vty CACHE_DIR=$(shell pwd)/.vty-cache
+
 	popd
 
 	rm -rf $(STAGE)
@@ -49,6 +58,7 @@ $(addprefix $(DEST)/, $(MAIN_TARGET)): $(DEST)/% :
 	install -m 0755 zebra-rs/target/release/zebra-rs  $(STAGE)/usr/bin/
 	install -m 0755 zebra-rs/target/release/vtyctl    $(STAGE)/usr/bin/
 	install -m 0755 zebra-rs/target/release/vtyhelper $(STAGE)/usr/bin/
+	install -m 0755 zebra-rs/vty/vty                  $(STAGE)/usr/bin/
 
 	# FRR's vtysh, as far as SONiC's tooling uses it: started under this
 	# name vtyctl takes FRR's command line (`-c 'show bgp summary json'`)
@@ -74,7 +84,7 @@ $(addprefix $(DEST)/, $(MAIN_TARGET)): $(DEST)/% :
 	# Strip: a release Rust binary still carries substantial symbol data,
 	# and zebra-rs is ~44 MB unstripped.
 	strip --strip-unneeded $(STAGE)/usr/bin/zebra-rs $(STAGE)/usr/bin/vtyctl \
-	    $(STAGE)/usr/bin/vtyhelper || true
+	    $(STAGE)/usr/bin/vtyhelper $(STAGE)/usr/bin/vty || true
 
 	dpkg-deb --build --root-owner-group $(STAGE) $(DEST)/$(MAIN_TARGET)
 	rm -rf $(STAGE)

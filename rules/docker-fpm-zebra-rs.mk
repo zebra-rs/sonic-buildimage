@@ -52,6 +52,9 @@ $(DOCKER_FPM_ZEBRA_RS)_RUN_OPT += -v /etc/localtime:/etc/localtime:ro
 # drive configuration zebra-rs has no counterpart for yet.
 $(DOCKER_FPM_ZEBRA_RS)_BASE_IMAGE_FILES += vtysh:/usr/bin/vtysh
 $(DOCKER_FPM_ZEBRA_RS)_BASE_IMAGE_FILES += rvtysh:/usr/bin/rvtysh
+# zebra-rs's own interactive shell, which FRR has no counterpart for:
+# `vty` on the host opens it in the bgp container.
+$(DOCKER_FPM_ZEBRA_RS)_BASE_IMAGE_FILES += vty:/usr/bin/vty
 
 SONIC_TRIXIE_DOCKERS += $(DOCKER_FPM_ZEBRA_RS)
 SONIC_TRIXIE_DBG_DOCKERS += $(DOCKER_FPM_ZEBRA_RS_DBG)

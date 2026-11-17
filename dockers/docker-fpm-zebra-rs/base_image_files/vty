@@ -1,0 +1,71 @@
+#!/bin/bash
+# vty: zebra-rs's interactive shell, run in the bgp container.
+#
+# The host-side counterpart of the vtysh wrapper next to it, for the
+# shell FRR has no equivalent of: `show` commands with completion and
+# `?` help, and `configure` mode. Configuration committed here goes
+# straight to zebra-rs and is not written to CONFIG_DB, so bgpcfgd does
+# not know about it and it does not survive a restart of the container.
+#
+# The pager is `less`; CLI_PAGER=cat in the caller's environment turns
+# it off.
+
+# read SONiC immutable variables
+[ -f /etc/sonic/sonic-environment ] && . /etc/sonic/sonic-environment
+
+function help()
+{
+    echo -e "Usage: $0 -n [0 to $(($NUM_ASIC-1))] [OPTION]... " 1>&2; exit 1;
+}
+
+DEV=""
+PLATFORM=${PLATFORM:-`sonic-cfggen -H -v DEVICE_METADATA.localhost.platform`}
+
+# Parse the device specific asic conf file, if it exists
+ASIC_CONF=/usr/share/sonic/device/$PLATFORM/asic.conf
+[ -f $ASIC_CONF ] && . $ASIC_CONF
+
+if [[ ($NUM_ASIC -gt 1) ]]; then
+    while getopts ":n:h:" opt; do
+        case "${opt}" in
+            h) help
+               ;;
+            n) DEV=${OPTARG}
+               [ $DEV -lt $NUM_ASIC -a  $DEV -ge 0 ] || help
+               ;;
+        esac
+    done
+
+    if [ -z "${DEV}" ]; then
+        help
+    fi
+
+    # Skip the arguments -n <inst> while passing to docker command
+    shift 2
+fi
+
+if [ ! -t 0 ] || [ ! -t 1 ]; then
+    echo "vty is an interactive shell and needs a terminal;" \
+         "use 'vtysh -c ...' or 'docker exec bgp$DEV vtyctl ...' in scripts" 1>&2
+    exit 1
+fi
+
+# `docker exec` does not stop the shell when its client goes away, so a
+# dropped SSH session would leave vty (and the admin role it may hold)
+# behind. Each instance is tagged with the caller's tty, and whenever
+# this wrapper ends the one carrying that tag is hung up. After a normal
+# exit there is none left and this does nothing.
+TTY=$(tty)
+function cleanup
+{
+    docker exec -i bgp$DEV sh -c '
+        for pid in $(pgrep -x vty); do
+            if tr "\0" "\n" < /proc/$pid/environ 2>/dev/null | grep -qx "VTY_HOST_TTY=$1"; then
+                kill -HUP $pid
+            fi
+        done' sh "$TTY"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+
+docker exec -ti -e VTY_HOST_TTY="$TTY" ${CLI_PAGER:+-e CLI_PAGER="$CLI_PAGER"} bgp$DEV vty "$@"
